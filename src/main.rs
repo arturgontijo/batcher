@@ -16,6 +16,7 @@ use bitcoincore_rpc::RpcApi;
 use bitcoind::{bitcoind_client, wait_for_block};
 use broker::{create_wallet, wallet_total_balance};
 use node::{fund_node, Node};
+use rand::{thread_rng, Rng};
 
 use std::{error::Error, sync::Arc, thread::sleep};
 use tokio::time::Duration;
@@ -23,9 +24,17 @@ use tokio::time::Duration;
 fn setup_nodes(
 	count: u8, mut port: u16, network: Network,
 ) -> Result<Vec<Arc<Node>>, Box<dyn Error>> {
+	let mut rng = thread_rng();
 	let mut nodes = vec![];
 	for i in 0..count {
-		let node = Arc::new(Node::new(port, network, format!("data/wallet_{}.db", i))?);
+		let seed: [u8; 32] = rng.gen();
+		let node = Arc::new(Node::new(
+			format!("node-{}", i),
+			&seed,
+			port,
+			network,
+			format!("data/wallet_{}.db", i),
+		)?);
 		let node_clone = node.clone();
 		tokio::spawn(async move { node_clone.start().await });
 		nodes.push(node);
@@ -58,11 +67,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	}
 
 	for node in &nodes {
-		println!("[{}] Balance: {}", node.node_id(), node.balance().total());
+		println!("[{}][{}] Balance: {}", node.node_id(), node.alias(), node.balance().total());
 	}
 
-	//                    (500k:0)- N2 -(500k:0)
-	//                   /                      \
+	//                    (500k:0)- N2 -(500k:0)    N7 (Sender)
+	//                   /                      \  /
 	//   N0 -(500k:0)- N1                        N4 -(500k:0)- N5 -(500k:0)- N6
 	//                   \                      /
 	//                    (500k:0)- N3 -(500k:0)
@@ -82,16 +91,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	let amount = Amount::from_sat(777_777);
 	let script_pubkey =
 		receiver.reveal_next_address(KeychainKind::External).address.script_pubkey();
+	let uniform_amount = true;
 	let fee_rate = FeeRate::from_sat_per_vb(DEFAULT_MIN_RELAY_TX_FEE as u64).unwrap();
 	let locktime: LockTime = LockTime::ZERO;
 	let max_utxo_count = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
-	let max_participants = 4;
+	let max_participants = 7;
 
 	// Sender must connect to an initial Node
 	nodes[sender_node_idx].connect(&nodes[initial_node_idx]).await;
 	while !nodes[sender_node_idx].is_peer_connected(&nodes[initial_node_idx].node_id()) {
 		tokio::time::sleep(Duration::from_millis(250)).await;
+		println!(
+			"Connecting to {} -> {} ...",
+			nodes[sender_node_idx].alias(),
+			nodes[initial_node_idx].alias()
+		);
 	}
 
 	nodes[sender_node_idx].init_psbt_batch(
@@ -100,7 +115,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 		amount,
 		fee_rate,
 		locktime,
-		true,
+		uniform_amount,
 		fee_per_participant,
 		max_participants,
 		max_utxo_count,
@@ -123,7 +138,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	let tx = psbt.clone().extract_tx()?;
 
 	for node in &nodes {
-		println!("[{}] SyncWallet (before)...", node.node_id());
 		node.sync_wallet(&bitcoind, false).await?;
 	}
 
@@ -149,19 +163,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 	nodes[sender_node_idx].broadcast_transactions(&[&tx])?;
 	let tx_id = bitcoind.send_raw_transaction(&tx)?;
-	println!("\nSent Tx (id={})...\n", tx_id);
+	println!("Tx Sent (id={})\n", tx_id);
 
 	wait_for_block(&bitcoind, 3)?;
 
 	for node in &nodes {
-		println!("[{}] SyncWallet (after)...", node.node_id());
 		node.sync_wallet(&bitcoind, false).await?;
 	}
 
 	let balance = wallet_total_balance(&bitcoind, &mut receiver)?;
 	println!(
-		"\n[{}] Receiver Balances (b/a/delta): {} | {} | {}\n",
+		"\n[{}][{}] Receiver Balances (b/a/delta): {} | {} | {}\n",
 		nodes[sender_node_idx].node_id(),
+		nodes[sender_node_idx].alias(),
 		receiver_initial_balance,
 		balance,
 		balance - receiver_initial_balance,
@@ -172,16 +186,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 		let balance = node.balance().confirmed;
 		if idx == sender_node_idx {
 			println!(
-				"[{}] Balances (b/a/delta)         : {} | {} | {}",
+				"[{}][{}] Balances (b/a/delta)         : {} | {} | {}",
 				node.node_id(),
+				node.alias(),
 				before,
 				balance,
 				before - balance,
 			);
 		} else {
 			println!(
-				"[{}] Balances (b/a/delta)         : {} | {} | {}",
+				"[{}][{}] Balances (b/a/delta)         : {} | {} | {}",
 				node.node_id(),
+				node.alias(),
 				before,
 				balance,
 				balance - before,

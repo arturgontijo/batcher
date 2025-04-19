@@ -20,8 +20,7 @@ pub enum BatchMessage {
 		max_participants: u8,
 		/// Vec of participants' node_id
 		participants: Vec<PublicKey>,
-		/// Vec of node_id, to be used when routing final PSBT back to user
-		hops: Vec<PublicKey>,
+		endpoints: Vec<String>,
 		/// PSBT hex string
 		psbt_hex: String,
 		/// Signing workflow
@@ -56,7 +55,7 @@ impl Writeable for BatchMessage {
 				fee_per_participant,
 				max_participants,
 				participants,
-				hops,
+				endpoints,
 				psbt_hex,
 				sign,
 			} => {
@@ -69,20 +68,20 @@ impl Writeable for BatchMessage {
 				// Vectors must tell us their length
 				let mut participants_len = 0;
 				for _ in participants.iter() {
-					participants_len += 1 + PUBLIC_KEY_SIZE;
+					participants_len += PUBLIC_KEY_SIZE;
 				}
 				(participants_len as u16).write(w)?;
 				for pub_key in participants.iter() {
 					pub_key.write(w)?;
 				}
 
-				let mut hops_len = 0;
-				for _ in hops.iter() {
-					hops_len += 1 + PUBLIC_KEY_SIZE;
+				let mut endpoints_len = 0;
+				for ep in endpoints.iter() {
+					endpoints_len += ep.len();
 				}
-				(hops_len as u16).write(w)?;
-				for pub_key in hops.iter() {
-					pub_key.write(w)?;
+				(endpoints_len as u16).write(w)?;
+				for ep in endpoints.iter() {
+					ep.write(w)?;
 				}
 				// ---
 				psbt_hex.write(w)?;
@@ -118,10 +117,10 @@ impl Readable for BatchMessage {
 			}
 			match Readable::read(r) {
 				Ok(pub_key) => {
-					if participants_len < addr_readpos + 1 + (PUBLIC_KEY_SIZE as u16) {
+					if participants_len < addr_readpos + (PUBLIC_KEY_SIZE as u16) {
 						return Err(DecodeError::BadLengthDescriptor);
 					}
-					addr_readpos += (1 + PUBLIC_KEY_SIZE) as u16;
+					addr_readpos += PUBLIC_KEY_SIZE as u16;
 					participants.push(pub_key);
 				},
 				Err(DecodeError::ShortRead) => return Err(DecodeError::BadLengthDescriptor),
@@ -129,27 +128,17 @@ impl Readable for BatchMessage {
 			}
 		}
 
-		let hops_len: u16 = Readable::read(r)?;
-		let mut hops: Vec<PublicKey> = Vec::new();
-		addr_readpos = 0;
-		loop {
-			if hops_len <= addr_readpos {
-				break;
-			}
-			match Readable::read(r) {
-				Ok(pub_key) => {
-					if hops_len < addr_readpos + 1 + (PUBLIC_KEY_SIZE as u16) {
-						return Err(DecodeError::BadLengthDescriptor);
-					}
-					addr_readpos += (1 + PUBLIC_KEY_SIZE) as u16;
-					hops.push(pub_key);
-				},
-				Err(DecodeError::ShortRead) => return Err(DecodeError::BadLengthDescriptor),
-				Err(e) => return Err(e),
-			}
+		let endpoints_len: u16 = Readable::read(r)?;
+		let mut endpoints: Vec<String> = Vec::new();
+		let mut addr_readpos = 0;
+
+		while addr_readpos < endpoints_len {
+			let ep = String::read(r)?;
+			addr_readpos += ep.len() as u16;
+			endpoints.push(ep);
 		}
 
-		let data = String::read(r)?;
+		let psbt_hex = String::read(r)?;
 		let sign = bool::read(r)?;
 
 		match msg_type[0] {
@@ -160,11 +149,11 @@ impl Readable for BatchMessage {
 				fee_per_participant,
 				max_participants,
 				participants,
-				hops,
-				psbt_hex: data,
+				endpoints,
+				psbt_hex,
 				sign,
 			}),
-			0x02 => Ok(BatchMessage::AnyOther { sender_node_id, receiver_node_id, data }),
+			0x02 => Ok(BatchMessage::AnyOther { sender_node_id, receiver_node_id, data: psbt_hex }),
 			_ => Err(DecodeError::UnknownVersion),
 		}
 	}
@@ -202,9 +191,9 @@ impl CustomMessageHandler for BatchMessageHandler {
 	}
 
 	fn peer_connected(
-		&self, their_node_id: PublicKey, _msg: &Init, _inbound: bool,
+		&self, _their_node_id: PublicKey, _msg: &Init, _inbound: bool,
 	) -> Result<(), ()> {
-		println!("📩 peer_connected: {}", their_node_id);
+		// println!("📩 peer_connected: {}", their_node_id);
 		Ok(())
 	}
 

@@ -34,26 +34,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{self, Duration};
 
 pub struct Node {
+	node_id: PublicKey,
+	node_alias: String,
+	endpoint: String,
 	pub peer_manager: Arc<PeerManager>,
 	pub channel_manager: Arc<ChannelManager>,
 	pub event_handler: Arc<SimpleEventHandler>,
 	pub custom_message_handler: Arc<BatchMessageHandler>,
 	pub broker: Broker,
-	pub endpoint: String,
-	node_id: PublicKey,
 }
 
 impl Node {
-	pub fn new(port: u16, network: Network, db_path: String) -> Result<Self, Box<dyn Error>> {
-		let mut rng = thread_rng();
-		let seed = rng.gen_range(0..255);
+	pub fn new(
+		node_alias: String, seed_bytes: &[u8; 32], port: u16, network: Network, db_path: String,
+	) -> Result<Self, Box<dyn Error>> {
 		let secp = Secp256k1::new();
 
 		// Step 1: Initialize KeysManager
-		let seed_bytes = [seed; 32]; // Fixed seed for simplicity; use secure random seed in production
 		let starting_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 		let keys_manager = Arc::new(KeysManager::new(
-			&seed_bytes,
+			seed_bytes,
 			starting_time.as_secs(),
 			starting_time.subsec_nanos(),
 		));
@@ -118,8 +118,14 @@ impl Node {
 
 		let custom_message_handler = Arc::new(BatchMessageHandler::new());
 
-		let broker =
-			Broker::new(node_id, &seed_bytes, network, &db_path, custom_message_handler.clone())?;
+		let broker = Broker::new(
+			node_id,
+			node_alias.clone(),
+			seed_bytes,
+			network,
+			&db_path,
+			custom_message_handler.clone(),
+		)?;
 
 		let message_handler = MessageHandler {
 			chan_handler: channel_manager.clone(),
@@ -128,23 +134,23 @@ impl Node {
 			custom_message_handler: custom_message_handler.clone(),
 		};
 
-		let ephemeral_random_data = [seed + 1; 32]; // Fixed for simplicity
 		let peer_manager = Arc::new(PeerManager::new(
 			message_handler,
 			starting_time.as_secs() as u32,
-			&ephemeral_random_data,
+			seed_bytes,
 			logger.clone(),
 			keys_manager.clone(),
 		));
 
 		Ok(Node {
+			node_id,
+			node_alias,
+			endpoint: format!("0.0.0.0:{}", port),
 			peer_manager,
 			channel_manager,
 			event_handler: Arc::new(SimpleEventHandler),
 			custom_message_handler,
 			broker,
-			endpoint: format!("0.0.0.0:{}", port),
-			node_id,
 		})
 	}
 
@@ -152,9 +158,17 @@ impl Node {
 		self.node_id
 	}
 
+	pub fn alias(&self) -> String {
+		self.node_alias.clone()
+	}
+
+	pub fn endpoint(&self) -> String {
+		self.endpoint.clone()
+	}
+
 	pub async fn start(&self) {
 		let listener = TcpListener::bind(&self.endpoint).await.expect("Failed to bind port");
-		println!("[{}] Node listening on {}", self.node_id, self.endpoint);
+		println!("[{}][{}] Node listening on {}", self.node_id, self.node_alias, self.endpoint);
 
 		// Clone to move into tasks
 		let broker = self.broker.clone();
@@ -185,7 +199,9 @@ impl Node {
 
 		let broker_clone = broker.clone();
 		let pm_clone = peer_manager.clone();
+		let node_alias = self.node_alias.clone();
 		let node_id = self.node_id;
+		let node_endpoint = self.endpoint.clone();
 		tokio::spawn(async move {
 			let mut interval = time::interval(Duration::from_millis(50));
 			loop {
@@ -194,7 +210,15 @@ impl Node {
 				let messages: Vec<_> =
 					custom_message_handler.queue.lock().unwrap().drain(..).collect();
 				for (_, msg) in messages {
-					process_batch_messages(&node_id, &broker_clone, pm_clone.clone(), msg).unwrap();
+					process_batch_messages(
+						&node_alias,
+						&node_id,
+						node_endpoint.clone(),
+						&broker_clone,
+						pm_clone.clone(),
+						msg,
+					)
+					.unwrap();
 				}
 			}
 		});
@@ -204,8 +228,9 @@ impl Node {
 			match listener.accept().await {
 				Ok((stream, addr)) => {
 					let node_id = self.node_id;
+					let node_alias = self.node_alias.clone();
 					let peer_manager = peer_manager.clone();
-					println!("[{}] New connection from {}", node_id, addr);
+					println!("[{}][{}] New connection from {}", node_id, node_alias, addr);
 					// Spawn a task to handle this connection
 					tokio::spawn(async move {
 						match stream.into_std() {
@@ -232,14 +257,14 @@ impl Node {
 		self.peer_manager.peer_by_node_id(their_node_id).is_some()
 	}
 
-	pub async fn connect(&self, node_b: &Node) {
-		let stream = TcpStream::connect(&node_b.endpoint).await.expect("Failed to connect");
-
-		let node_b_id = node_b.node_id;
+	pub async fn connect(&self, other: &Node) {
+		let other_id = other.node_id;
+		let other_endpoint = other.endpoint.clone();
 		let peer_manager = self.peer_manager.clone();
 		tokio::spawn(async move {
+			let stream = TcpStream::connect(&other_endpoint).await.expect("Failed to connect");
 			match stream.into_std() {
-				Ok(std_stream) => setup_outbound(peer_manager.clone(), node_b_id, std_stream).await,
+				Ok(std_stream) => setup_outbound(peer_manager.clone(), other_id, std_stream).await,
 				Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
 			}
 		});
@@ -277,7 +302,7 @@ impl Node {
 			fee_per_participant,
 			max_participants: max_participants + 1,
 			participants: vec![self.node_id()],
-			hops: vec![self.node_id()],
+			endpoints: vec![self.endpoint()],
 			psbt_hex: psbt.serialize_hex(),
 			sign: false,
 		};
@@ -292,7 +317,10 @@ impl Node {
 		let latest = client.get_block_count()?;
 		let stored = wallet.latest_checkpoint().block_id().height as u64;
 		if debug {
-			println!("[{}] SyncWalletBlock: (stored={} | latest={})", self.node_id, stored, latest);
+			println!(
+				"[{}][{}] SyncWalletBlock: (stored={} | latest={})",
+				self.node_id, self.node_alias, stored, latest
+			);
 		}
 		for height in stored..latest {
 			let hash = client.get_block_hash(height)?;

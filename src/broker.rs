@@ -24,6 +24,7 @@ const DB_MAGIC: &str = "bdk-rpc-wallet-example";
 #[derive(Clone)]
 pub struct Broker {
 	pub node_id: PublicKey,
+	pub node_alias: String,
 	pub custom_message_handler: Arc<BatchMessageHandler>,
 	pub wallet: Arc<Mutex<PersistedWallet<Store<bdk_wallet::ChangeSet>>>>,
 	pub batch_psbts: Arc<Mutex<Vec<String>>>,
@@ -31,8 +32,8 @@ pub struct Broker {
 
 impl Broker {
 	pub fn new(
-		node_id: PublicKey, seed_bytes: &[u8; 32], network: Network, db_path: &str,
-		custom_message_handler: Arc<BatchMessageHandler>,
+		node_id: PublicKey, node_alias: String, seed_bytes: &[u8; 32], network: Network,
+		db_path: &str, custom_message_handler: Arc<BatchMessageHandler>,
 	) -> Result<Self, Box<dyn Error>> {
 		let mut db =
 			Store::<bdk_wallet::ChangeSet>::open_or_create_new(DB_MAGIC.as_bytes(), db_path)?;
@@ -60,6 +61,7 @@ impl Broker {
 		let batch_psbts = Arc::new(Mutex::new(vec![]));
 		Ok(Broker {
 			node_id,
+			node_alias,
 			custom_message_handler,
 			wallet: Arc::new(Mutex::new(wallet)),
 			batch_psbts,
@@ -118,8 +120,12 @@ impl Broker {
 				};
 
 				println!(
-					"[{}] Adding UTXO [txid={:?} | vout={:?} | amt={}]",
-					self.node_id, utxo.outpoint.txid, utxo.outpoint.vout, utxo.txout.value
+					"[{}][{}] Adding UTXO [txid={:?} | vout={:?} | amt={}]",
+					self.node_id,
+					self.node_alias,
+					utxo.outpoint.txid,
+					utxo.outpoint.vout,
+					utxo.txout.value
 				);
 
 				psbt.inputs.push(Input { non_witness_utxo: Some(tx), ..Default::default() });
@@ -166,7 +172,6 @@ impl Broker {
 	}
 
 	pub fn send(&self, their_node_id: PublicKey, msg: BatchMessage) -> Result<(), Box<dyn Error>> {
-		println!("[{}] signer.send({})", self.node_id, their_node_id);
 		self.custom_message_handler.send(their_node_id, msg);
 		Ok(())
 	}

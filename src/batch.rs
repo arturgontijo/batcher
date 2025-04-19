@@ -1,58 +1,65 @@
 use std::error::Error;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
 use bitcoin::psbt::{Input, Output};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, Psbt, TxIn, TxOut};
+use lightning_net_tokio::setup_outbound;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use tokio::net::TcpStream;
 
 use crate::broker::Broker;
 use crate::messages::BatchMessage;
 use crate::types::PeerManager;
 
 pub(crate) fn process_batch_messages(
-	node_id: &PublicKey, broker: &Broker, peer_manager: Arc<PeerManager>, msg: BatchMessage,
+	node_alias: &String, node_id: &PublicKey, node_endpoint: String, broker: &Broker,
+	peer_manager: Arc<PeerManager>, msg: BatchMessage,
 ) -> Result<(), Box<dyn Error>> {
 	if let BatchMessage::BatchPsbt {
 		sender_node_id,
-		receiver_node_id,
+		receiver_node_id: _,
 		uniform_amount,
 		fee_per_participant,
 		max_participants,
 		participants,
-		hops,
+		endpoints,
 		psbt_hex,
 		sign,
 	} = msg
 	{
 		println!(
-                "[{}] BatchPsbt: sender={} | uni_amount={} | fee={} | max_p={} | participants={} | hops={} | len={} | sign={}",
-                node_id,
-                sender_node_id,
-                uniform_amount,
-                fee_per_participant,
-                max_participants,
-                participants.len(),
-                hops.len(),
-                psbt_hex.len(),
-                sign,
-            );
+			"[{}][{}] BatchPsbt: sender={} | uni_amt={} | fee={} | max_p={} | pts={} | ep={} | len={} | sign={}",
+			node_id,
+			node_alias,
+			sender_node_id,
+			uniform_amount,
+			fee_per_participant,
+			max_participants,
+			participants.len(),
+			endpoints.len(),
+			psbt_hex.len(),
+			sign,
+		);
 
 		let mut psbt = Psbt::deserialize(&hex::decode(psbt_hex).unwrap()).unwrap();
 
-		let mut hops = hops;
-		let mut participants = participants;
+		let mut participants = participants.clone();
+		let mut endpoints = endpoints.clone();
 
 		// Not a participant yet
-		if !sign && !participants.contains(&receiver_node_id) {
-			participants.push(receiver_node_id);
+		if !sign && !participants.contains(node_id) {
+			participants.push(*node_id);
+			endpoints.push(node_endpoint.clone());
 			// Add node's inputs/outputs and route it to the next node
 			let fee = Amount::from_sat(fee_per_participant);
 
 			let uniform_amount_opt =
 				if uniform_amount > 0 { Some(Amount::from_sat(uniform_amount)) } else { None };
-			broker.add_utxos_to_psbt(&mut psbt, 2, uniform_amount_opt, fee, false).unwrap();
+			broker.add_utxos_to_psbt(&mut psbt, 2, uniform_amount_opt, fee, false)?;
 		}
 
 		let mut sign = sign;
@@ -60,7 +67,7 @@ pub(crate) fn process_batch_messages(
 			sign = true;
 
 			// Shuffling inputs/outputs
-			println!("\n[{}] BatchPsbt: Shuffling inputs/outputs before starting the Signing workflow...", node_id);
+			println!("\n[{}][{}] BatchPsbt: Shuffling inputs/outputs before starting the Signing workflow...", node_id, node_alias);
 			let mut rng = thread_rng();
 			let mut paired_inputs: Vec<(Input, TxIn)> =
 				psbt.inputs.iter().cloned().zip(psbt.unsigned_tx.input.iter().cloned()).collect();
@@ -83,18 +90,16 @@ pub(crate) fn process_batch_messages(
 			psbt.outputs = shuffled_psbt_outputs;
 			psbt.unsigned_tx.output = shuffled_tx_outputs;
 
-			println!("\n[{}] BatchPsbt: Starting the Signing workflow (send final PSBT back to initial node)...\n", node_id);
+			println!("\n[{}][{}] BatchPsbt: Starting the Signing workflow (send final PSBT back to initial node)...\n", node_id, node_alias);
 		}
 
-		let peers = peer_manager.list_peers();
+		let mut peers = peer_manager.list_peers();
+		peers.shuffle(&mut thread_rng());
 
 		if !sign {
 			let mut next_node_id = None;
 			for peer in &peers {
 				if participants.contains(&peer.counterparty_node_id) {
-					continue;
-				}
-				if hops.last().unwrap() == &peer.counterparty_node_id {
 					continue;
 				}
 				next_node_id = Some(peer.counterparty_node_id);
@@ -115,18 +120,17 @@ pub(crate) fn process_batch_messages(
 				}
 			}
 
-			hops.push(receiver_node_id);
 			let psbt_hex = psbt.serialize_hex();
 
 			let next_node_id = next_node_id.unwrap();
 			let msg = BatchMessage::BatchPsbt {
-				sender_node_id: receiver_node_id,
+				sender_node_id: *node_id,
 				receiver_node_id: next_node_id,
 				uniform_amount,
 				fee_per_participant,
 				max_participants,
-				participants: participants.clone(),
-				hops: hops.clone(),
+				participants,
+				endpoints,
 				psbt_hex,
 				sign: false,
 			};
@@ -134,58 +138,68 @@ pub(crate) fn process_batch_messages(
 			broker.send(next_node_id, msg)?;
 		} else {
 			// Check if we need to sign or just route the PSBT to someone else
-			if participants.contains(&receiver_node_id) {
-				println!("[{}] BatchPsbt: Signing...", node_id);
+			if participants.contains(node_id) {
+				println!("[{}][{}] BatchPsbt: Signing...", node_id, node_alias);
 				broker.sign_psbt(&mut psbt).unwrap();
-				participants.retain(|key| *key != receiver_node_id);
+				participants.retain(|key| key != node_id);
+				endpoints.retain(|ep| ep != &node_endpoint.clone());
 			}
 
 			let psbt_hex = psbt.serialize_hex();
 
 			// Do we need more signatures?
-			if !hops.is_empty() {
-				let next_signer_node_id = hops.pop().unwrap();
+			if !participants.is_empty() {
+				let next_signer_node_id = *participants.last().unwrap();
+				let next_signer_endpoint = endpoints.last().unwrap().clone();
+				// Wait for handshake to finish
+				while peer_manager.peer_by_node_id(&next_signer_node_id).is_none() {
+					let next_signer_endpoint = next_signer_endpoint.clone();
+					sleep(Duration::from_millis(500));
+					if peer_manager.peer_by_node_id(&next_signer_node_id).is_none() {
+						let pm_clone = peer_manager.clone();
+						tokio::spawn(async move {
+							let stream = TcpStream::connect(&next_signer_endpoint)
+								.await
+								.expect("Failed to connect");
+							match stream.into_std() {
+								Ok(std_stream) => {
+									setup_outbound(
+										pm_clone.clone(),
+										next_signer_node_id,
+										std_stream,
+									)
+									.await
+								},
+								Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
+							}
+						});
+						sleep(Duration::from_millis(500));
+					}
+				}
 				if peer_manager.peer_by_node_id(&next_signer_node_id).is_some() {
 					let msg = BatchMessage::BatchPsbt {
-						sender_node_id: receiver_node_id,
+						sender_node_id: *node_id,
 						receiver_node_id: next_signer_node_id,
 						uniform_amount,
 						fee_per_participant,
 						max_participants,
-						participants: participants.clone(),
-						hops: hops.clone(),
+						participants,
+						endpoints,
 						psbt_hex,
 						sign: true,
 					};
 					broker.send(next_signer_node_id, msg)?;
 				} else {
-					let mut inner_participants = participants.clone();
-					for node_id in participants.iter().rev() {
-						if peer_manager.peer_by_node_id(node_id).is_some() {
-							// We need to add back the next_signer_node_id to participants
-							if !inner_participants.contains(&next_signer_node_id) {
-								inner_participants.push(next_signer_node_id);
-							}
-							let msg = BatchMessage::BatchPsbt {
-								sender_node_id: receiver_node_id,
-								receiver_node_id: *node_id,
-								uniform_amount,
-								fee_per_participant,
-								max_participants,
-								participants: inner_participants,
-								hops: hops.clone(),
-								psbt_hex,
-								sign: true,
-							};
-							broker.send(next_signer_node_id, msg)?;
-							break;
-						}
-					}
+					println!(
+						"[{}][{}] BatchPsbt: Woooooops (not connected to: {})!",
+						node_id, node_alias, next_signer_node_id
+					);
 				}
 			} else {
 				println!(
-					"[{}] BatchPsbt: PSBT was signed by all participants! (len={})",
+					"[{}][{}] BatchPsbt: PSBT was signed by all participants! (len={})",
 					node_id,
+					node_alias,
 					psbt_hex.len()
 				);
 				broker.push_to_batch_psbts(psbt_hex).unwrap();
