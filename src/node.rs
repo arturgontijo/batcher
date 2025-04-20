@@ -6,11 +6,11 @@ use crate::messages::{BatchMessage, BatchMessageHandler};
 use crate::persister::InMemoryPersister;
 use crate::types::{ChainMonitor, ChannelManager, FixedFeeEstimator, MockBroadcaster, PeerManager};
 
-use bdk_wallet::{Balance, KeychainKind};
+use bdk_wallet::Balance;
 use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
-use bitcoin::{Amount, FeeRate, Psbt, ScriptBuf, Transaction};
-use bitcoincore_rpc::{Client, RpcApi};
+use bitcoin::{Address, Amount, FeeRate, Psbt, ScriptBuf, Transaction};
+use bitcoincore_rpc::Client;
 use lightning::bitcoin::network::Network;
 use lightning::events::EventsProvider;
 use lightning::ln::channelmanager::ChainParameters;
@@ -24,12 +24,11 @@ use lightning::routing::scoring::{
 use lightning::sign::KeysManager;
 use lightning::util::config::UserConfig;
 use lightning_net_tokio::{setup_inbound, setup_outbound};
-use rand::{thread_rng, Rng};
 use tokio::net::{TcpListener, TcpStream};
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{self, Duration};
 
@@ -42,6 +41,7 @@ pub struct Node {
 	pub event_handler: Arc<SimpleEventHandler>,
 	pub custom_message_handler: Arc<BatchMessageHandler>,
 	pub broker: Broker,
+	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
 }
 
 impl Node {
@@ -123,7 +123,7 @@ impl Node {
 			node_alias.clone(),
 			seed_bytes,
 			network,
-			&db_path,
+			db_path,
 			custom_message_handler.clone(),
 		)?;
 
@@ -151,6 +151,7 @@ impl Node {
 			event_handler: Arc::new(SimpleEventHandler),
 			custom_message_handler,
 			broker,
+			runtime: Default::default(),
 		})
 	}
 
@@ -166,9 +167,29 @@ impl Node {
 		self.endpoint.clone()
 	}
 
-	pub async fn start(&self) {
-		let listener = TcpListener::bind(&self.endpoint).await.expect("Failed to bind port");
-		println!("[{}][{}] Node listening on {}", self.node_id, self.node_alias, self.endpoint);
+	pub fn pubkey(&self) -> PublicKey {
+		self.broker.pubkey
+	}
+
+	pub fn create_multisig(
+		&self, network: Network, other: &PublicKey, db_path: String,
+	) -> Result<(), Box<dyn Error>> {
+		self.broker.create_multisig(network, other, db_path)
+	}
+
+	pub fn multisig_sync(
+		&self, client: &Client, other: &PublicKey, debug: bool,
+	) -> Result<(), Box<dyn Error>> {
+		self.broker.multisig_sync(client, other, debug)
+	}
+
+	pub fn start(&self) -> Result<(), Box<dyn Error>> {
+		let mut runtime_lock = self.runtime.write().unwrap();
+		if runtime_lock.is_some() {
+			return Err("Node is already running!".into());
+		}
+
+		let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
 
 		// Clone to move into tasks
 		let broker = self.broker.clone();
@@ -179,7 +200,7 @@ impl Node {
 		// === 1. Background task: Event processing ===
 		let cm_clone = channel_manager.clone();
 		let eh_clone = self.event_handler.clone();
-		tokio::spawn(async move {
+		runtime.spawn(async move {
 			let mut interval = time::interval(Duration::from_millis(100));
 			loop {
 				interval.tick().await;
@@ -189,7 +210,7 @@ impl Node {
 
 		// === 2. Background task: Peer ticks (ping, cleanup) ===
 		let pm_clone = peer_manager.clone();
-		tokio::spawn(async move {
+		runtime.spawn(async move {
 			let mut interval = time::interval(Duration::from_secs(10));
 			loop {
 				interval.tick().await;
@@ -202,7 +223,7 @@ impl Node {
 		let node_alias = self.node_alias.clone();
 		let node_id = self.node_id;
 		let node_endpoint = self.endpoint.clone();
-		tokio::spawn(async move {
+		runtime.spawn(async move {
 			let mut interval = time::interval(Duration::from_millis(50));
 			loop {
 				interval.tick().await;
@@ -224,32 +245,54 @@ impl Node {
 		});
 
 		// === 3. Accept incoming connections ===
-		loop {
-			match listener.accept().await {
-				Ok((stream, addr)) => {
-					let node_id = self.node_id;
-					let node_alias = self.node_alias.clone();
-					let peer_manager = peer_manager.clone();
-					println!("[{}][{}] New connection from {}", node_id, node_alias, addr);
-					// Spawn a task to handle this connection
-					tokio::spawn(async move {
-						match stream.into_std() {
-							Ok(std_stream) => {
-								setup_inbound(peer_manager.clone(), std_stream).await;
-							},
-							Err(e) => {
-								eprintln!(
-									"[{}] Failed to convert tokio stream to std: {}",
-									node_id, e
-								);
-							},
-						}
-					});
-				},
-				Err(e) => {
-					eprintln!("[{}] Connection failed: {}", self.node_id, e);
-				},
+		let node_id = self.node_id;
+		let node_alias = self.node_alias.clone();
+		let endpoint = self.endpoint.clone();
+		runtime.spawn(async move {
+			let listener = TcpListener::bind(&endpoint).await.expect("Failed to bind port");
+			println!("[{}][{}] Node listening on {}", node_id, node_alias, endpoint);
+			loop {
+				let peer_manager = peer_manager.clone();
+				match listener.accept().await {
+					Ok((stream, addr)) => {
+						println!("[{}][{}] New connection from {}", node_id, node_alias, addr);
+						// Spawn a task to handle this connection
+						tokio::spawn(async move {
+							match stream.into_std() {
+								Ok(std_stream) => {
+									setup_inbound(peer_manager.clone(), std_stream).await;
+								},
+								Err(e) => {
+									eprintln!(
+										"[{}] Failed to convert tokio stream to std: {}",
+										node_id, e
+									);
+								},
+							}
+						});
+					},
+					Err(e) => {
+						eprintln!("[{}] Connection failed: {}", node_id, e);
+					},
+				}
 			}
+		});
+
+		*runtime_lock = Some(runtime);
+
+		Ok(())
+	}
+
+	pub fn stop(&self) -> Result<(), Box<dyn Error>> {
+		let mut runtime_lock = self.runtime.write().unwrap();
+		if let Some(runtime) = runtime_lock.take() {
+			self.peer_manager.disconnect_all_peers();
+			std::thread::spawn(move || {
+				drop(runtime); // Gracefully shut down the runtime
+			});
+			Ok(())
+		} else {
+			Err("Node is not running!".into())
 		}
 	}
 
@@ -290,7 +333,88 @@ impl Node {
 		// Initiator must cover all the batch fees
 		let total_fee = fee_per_participant * (max_participants as u64);
 
-		self.add_utxos_to_psbt(&mut psbt, max_utxo_count, None, total_fee, true).unwrap();
+		self.add_utxos_to_psbt(&mut psbt, max_utxo_count, None, total_fee, true)?;
+
+		let fee_per_participant = fee_per_participant.to_sat();
+		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
+
+		let batch_psbt = BatchMessage::BatchPsbt {
+			sender_node_id: self.node_id(),
+			receiver_node_id: their_node_id,
+			uniform_amount,
+			fee_per_participant,
+			max_participants: max_participants + 1,
+			participants: vec![self.node_id()],
+			endpoints: vec![self.endpoint()],
+			psbt_hex: psbt.serialize_hex(),
+			sign: false,
+		};
+
+		self.broker.send(their_node_id, batch_psbt)?;
+
+		Ok(())
+	}
+
+	pub fn init_multisig_psbt_batch(
+		&self, other: &PublicKey, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate,
+		locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
+		max_participants: u8, max_utxo_count: u16,
+	) -> Result<(), Box<dyn Error>> {
+		let mut psbt =
+			self.broker.multisig_build_psbt(other, output_script, amount, fee_rate, locktime)?;
+
+		// Initiator must cover all the batch fees
+		let total_fee = fee_per_participant * (max_participants as u64);
+
+		self.multisig_add_utxos_to_psbt(other, &mut psbt, max_utxo_count, None, total_fee, true)?;
+
+		// Adding node's wallet UTXOs
+		self.add_utxos_to_psbt(
+			&mut psbt,
+			max_utxo_count,
+			Some(amount),
+			fee_per_participant,
+			false,
+		)?;
+
+		let fee_per_participant = fee_per_participant.to_sat();
+		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
+
+		if let Some(pd) = self.peer_manager.list_peers().first() {
+			let batch_psbt = BatchMessage::BatchPsbt {
+				sender_node_id: self.node_id(),
+				receiver_node_id: pd.counterparty_node_id,
+				uniform_amount,
+				fee_per_participant,
+				max_participants,
+				participants: vec![self.node_id()],
+				endpoints: vec![self.endpoint()],
+				psbt_hex: psbt.serialize_hex(),
+				sign: false,
+			};
+			self.broker.send(pd.counterparty_node_id, batch_psbt)?;
+		} else {
+			return Err("Node has no peers connected!".into());
+		}
+
+		Ok(())
+	}
+
+	fn _psbt_batch(
+		&self, their_node_id: PublicKey, output_script: ScriptBuf, amount: Amount,
+		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
+		max_participants: u8, max_utxo_count: u16,
+	) -> Result<(), Box<dyn Error>> {
+		self.peer_manager
+			.peer_by_node_id(&their_node_id)
+			.ok_or(format!("[{}] Peer not connected: {}", self.node_id, their_node_id))?;
+
+		let mut psbt = self.build_psbt(output_script, amount, fee_rate, locktime)?;
+
+		// Initiator must cover all the batch fees
+		let total_fee = fee_per_participant * (max_participants as u64);
+
+		self.add_utxos_to_psbt(&mut psbt, max_utxo_count, None, total_fee, true)?;
 
 		let fee_per_participant = fee_per_participant.to_sat();
 		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
@@ -313,62 +437,46 @@ impl Node {
 	}
 
 	pub async fn sync_wallet(&self, client: &Client, debug: bool) -> Result<(), Box<dyn Error>> {
-		let mut wallet = self.broker.wallet.lock().unwrap();
-		let latest = client.get_block_count()?;
-		let stored = wallet.latest_checkpoint().block_id().height as u64;
-		if debug {
-			println!(
-				"[{}][{}] SyncWalletBlock: (stored={} | latest={})",
-				self.node_id, self.node_alias, stored, latest
-			);
-		}
-		for height in stored..latest {
-			let hash = client.get_block_hash(height)?;
-			let block = client.get_block(&hash)?;
-			wallet.apply_block(&block, height as u32)?;
-		}
-		Ok(())
+		self.broker.sync_wallet(client, debug)
 	}
 
 	pub fn balance(&self) -> Balance {
 		self.broker.balance()
 	}
 
+	pub fn multisig_balance(&self, other: &PublicKey) -> Result<Balance, Box<dyn Error>> {
+		self.broker.multisig_balance(other)
+	}
+
+	pub fn multisig_new_address(&self, other: &PublicKey) -> Result<Address, Box<dyn Error>> {
+		self.broker.multisig_new_address(other)
+	}
+
+	pub fn wallet_new_address(&self) -> Result<Address, Box<dyn Error>> {
+		self.broker.wallet_new_address()
+	}
+
 	pub fn add_utxos_to_psbt(
 		&self, psbt: &mut Psbt, max_count: u16, uniform_amount: Option<Amount>, fee: Amount,
 		payer: bool,
-	) -> Result<(), Box<dyn std::error::Error>> {
+	) -> Result<(), Box<dyn Error>> {
 		self.broker.add_utxos_to_psbt(psbt, max_count, uniform_amount, fee, payer)
 	}
 
-	pub fn broadcast_transactions(
-		&self, txs: &[&Transaction],
-	) -> Result<(), Box<dyn std::error::Error>> {
+	pub fn multisig_add_utxos_to_psbt(
+		&self, other: &PublicKey, psbt: &mut Psbt, max_count: u16, uniform_amount: Option<Amount>,
+		fee: Amount, payer: bool,
+	) -> Result<(), Box<dyn Error>> {
+		self.broker.multisig_add_utxos_to_psbt(other, psbt, max_count, uniform_amount, fee, payer)
+	}
+
+	pub fn multisig_sign_psbt(
+		&self, other: &PublicKey, psbt: &mut Psbt,
+	) -> Result<(), Box<dyn Error>> {
+		self.broker.multisig_sign_psbt(other, psbt)
+	}
+
+	pub fn broadcast_transactions(&self, txs: &[&Transaction]) -> Result<(), Box<dyn Error>> {
 		self.broker.broadcast_transactions(txs)
 	}
-}
-
-pub async fn fund_node(
-	client: &Client, node: &Node, amount: Amount, utxos: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-	let mut wallet = node.broker.wallet.lock().unwrap();
-	let mut rng = thread_rng();
-	for _ in 0..utxos {
-		let address = wallet.reveal_next_address(KeychainKind::External).address;
-		// range -15% and +15%
-		let variation_factor = rng.gen_range(-0.15..=0.15);
-		let amount_u64 = amount.to_sat();
-		let random_amount = amount_u64 as f64 * (1.0 + variation_factor);
-		client.send_to_address(
-			&address,
-			Amount::from_sat(random_amount.round() as u64),
-			None,
-			None,
-			None,
-			None,
-			None,
-			None,
-		)?;
-	}
-	Ok(())
 }

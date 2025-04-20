@@ -1,23 +1,31 @@
 use std::{
+	collections::HashMap,
 	error::Error,
 	sync::{Arc, Mutex},
 };
 
 use bdk_wallet::{
 	bitcoin::{bip32::Xpriv, Amount, Network},
+	descriptor::IntoWalletDescriptor,
 	file_store::Store,
 	template::Bip84,
-	Balance, KeychainKind, PersistedWallet, SignOptions, Wallet,
+	Balance, KeychainKind, SignOptions, Wallet,
 };
 use bitcoin::{
 	absolute::LockTime,
+	key::Secp256k1,
+	opcodes,
 	psbt::{Input, Output},
-	secp256k1::PublicKey,
-	FeeRate, Psbt, ScriptBuf, Transaction, TxIn, TxOut,
+	secp256k1::{PublicKey, SecretKey},
+	Address, FeeRate, NetworkKind, Psbt, ScriptBuf, Transaction, TxIn, TxOut,
 };
-use bitcoincore_rpc::{Client, RpcApi};
+use bitcoincore_rpc::Client;
 
-use crate::messages::{BatchMessage, BatchMessageHandler};
+use crate::{
+	messages::{BatchMessage, BatchMessageHandler},
+	types::PersistedWallet,
+	wallet::sync_wallet,
+};
 
 const DB_MAGIC: &str = "bdk-rpc-wallet-example";
 
@@ -26,23 +34,78 @@ pub struct Broker {
 	pub node_id: PublicKey,
 	pub node_alias: String,
 	pub custom_message_handler: Arc<BatchMessageHandler>,
-	pub wallet: Arc<Mutex<PersistedWallet<Store<bdk_wallet::ChangeSet>>>>,
+	pub pubkey: PublicKey,
+	pub wif: String,
+	pub wallets: Arc<Mutex<HashMap<PublicKey, PersistedWallet>>>,
 	pub batch_psbts: Arc<Mutex<Vec<String>>>,
 }
 
 impl Broker {
 	pub fn new(
 		node_id: PublicKey, node_alias: String, seed_bytes: &[u8; 32], network: Network,
-		db_path: &str, custom_message_handler: Arc<BatchMessageHandler>,
+		db_path: String, custom_message_handler: Arc<BatchMessageHandler>,
 	) -> Result<Self, Box<dyn Error>> {
-		let mut db =
-			Store::<bdk_wallet::ChangeSet>::open_or_create_new(DB_MAGIC.as_bytes(), db_path)?;
+		let secp = Secp256k1::new();
+		let secret_key = SecretKey::from_slice(seed_bytes)?;
+		let pubkey = PublicKey::from_secret_key(&secp, &secret_key);
 
+		let wif =
+			bitcoin::PrivateKey { compressed: true, network: NetworkKind::Test, inner: secret_key }
+				.to_wif();
+
+		let wallet = Self::create_wallet(seed_bytes, network, db_path)?;
+
+		let wallets = Arc::new(Mutex::new(HashMap::from([(pubkey, wallet)])));
+
+		let batch_psbts = Arc::new(Mutex::new(vec![]));
+
+		Ok(Broker {
+			node_id,
+			node_alias,
+			custom_message_handler,
+			pubkey,
+			wif,
+			wallets,
+			batch_psbts,
+		})
+	}
+
+	fn create_wallet(
+		seed_bytes: &[u8; 32], network: Network, db_path: String,
+	) -> Result<PersistedWallet, Box<dyn Error>> {
 		let xprv = Xpriv::new_master(network, seed_bytes)
 			.map_err(|e| format!("Failed to derive master secret: {}", e))?;
+		Self::create_persisted_wallet(
+			network,
+			db_path,
+			Bip84(xprv, KeychainKind::External),
+			Bip84(xprv, KeychainKind::Internal),
+		)
+	}
 
-		let descriptor = Bip84(xprv, KeychainKind::External);
-		let change_descriptor = Bip84(xprv, KeychainKind::Internal);
+	pub fn create_multisig(
+		&self, network: Network, other: &PublicKey, db_path: String,
+	) -> Result<(), Box<dyn Error>> {
+		let mut wallets = self.wallets.lock().unwrap();
+		// 2-of-2 descriptor
+		let descriptor = format!("wsh(multi(2,{},{}))", self.wif, other);
+		// Change is controlled just by other
+		let change_descriptor = format!("wpkh({})", other);
+
+		// If we want to also use 2-of-2 for change
+		// let change_descriptor = format!("wsh(sortedmulti(2,{},{}))", other, self.pubkey);
+
+		let wallet =
+			Self::create_persisted_wallet(network, db_path, descriptor, change_descriptor)?;
+		wallets.insert(*other, wallet);
+		Ok(())
+	}
+
+	pub fn create_persisted_wallet<D: IntoWalletDescriptor + Send + Clone + 'static>(
+		network: Network, db_path: String, descriptor: D, change_descriptor: D,
+	) -> Result<PersistedWallet, Box<dyn Error>> {
+		let mut db =
+			Store::<bdk_wallet::ChangeSet>::open_or_create_new(DB_MAGIC.as_bytes(), db_path)?;
 
 		let wallet_opt = Wallet::load()
 			.descriptor(KeychainKind::External, Some(descriptor.clone()))
@@ -57,28 +120,80 @@ impl Broker {
 				.network(network)
 				.create_wallet(&mut db)?,
 		};
+		Ok(wallet)
+	}
 
-		let batch_psbts = Arc::new(Mutex::new(vec![]));
-		Ok(Broker {
-			node_id,
-			node_alias,
-			custom_message_handler,
-			wallet: Arc::new(Mutex::new(wallet)),
-			batch_psbts,
-		})
+	pub fn sync_wallet(&self, client: &Client, debug: bool) -> Result<(), Box<dyn Error>> {
+		let mut binding = self.wallets.lock().unwrap();
+		let wallet = binding.get_mut(&self.pubkey).unwrap();
+		sync_wallet(client, wallet, debug)?;
+		Ok(())
+	}
+
+	pub fn multisig_sync(
+		&self, client: &Client, other: &PublicKey, debug: bool,
+	) -> Result<(), Box<dyn Error>> {
+		let mut multisigs = self.wallets.lock().unwrap();
+		if let Some(wallet) = multisigs.get_mut(other) {
+			sync_wallet(client, wallet, debug)?;
+		}
+		Ok(())
+	}
+
+	pub fn multisig_new_address(&self, other: &PublicKey) -> Result<Address, Box<dyn Error>> {
+		let mut multisigs = self.wallets.lock().unwrap();
+		if let Some(wallet) = multisigs.get_mut(other) {
+			let address = wallet.reveal_next_address(KeychainKind::External).address;
+			return Ok(address);
+		}
+		Err("Multisig not found!".into())
+	}
+
+	pub fn wallet_new_address(&self) -> Result<Address, Box<dyn Error>> {
+		let mut wallets = self.wallets.lock().unwrap();
+		let wallet = wallets.get_mut(&self.pubkey).unwrap();
+		let address = wallet.reveal_next_address(KeychainKind::External).address;
+		Ok(address)
 	}
 
 	pub fn balance(&self) -> Balance {
-		self.wallet.lock().unwrap().balance()
+		self.wallets.lock().unwrap().get(&self.pubkey).unwrap().balance()
+	}
+
+	pub fn multisig_balance(&self, other: &PublicKey) -> Result<Balance, Box<dyn Error>> {
+		let mut multisigs = self.wallets.lock().unwrap();
+		match multisigs.get_mut(other) {
+			Some(wallet) => Ok(wallet.balance()),
+			None => Err("Multisig not found!".into()),
+		}
 	}
 
 	pub fn build_psbt(
 		&self, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate, locktime: LockTime,
 	) -> Result<Psbt, Box<dyn Error>> {
-		let mut binding = self.wallet.lock().unwrap();
-		let mut tx_builder = binding.build_tx();
-		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
+		let mut wallets = self.wallets.lock().unwrap();
+		let wallet = wallets.get_mut(&self.pubkey).unwrap();
+		self._build_psbt(wallet, output_script, amount, fee_rate, locktime)
+	}
 
+	pub fn multisig_build_psbt(
+		&self, other: &PublicKey, script_pubkey: ScriptBuf, amount: Amount, fee_rate: FeeRate,
+		locktime: LockTime,
+	) -> Result<Psbt, Box<dyn Error>> {
+		let mut multisigs = self.wallets.lock().unwrap();
+		if let Some(wallet) = multisigs.get_mut(other) {
+			let psbt = self._build_psbt(wallet, script_pubkey, amount, fee_rate, locktime)?;
+			return Ok(psbt);
+		}
+		Err("Multisig not found!".into())
+	}
+
+	fn _build_psbt(
+		&self, wallet: &mut PersistedWallet, output_script: ScriptBuf, amount: Amount,
+		fee_rate: FeeRate, locktime: LockTime,
+	) -> Result<Psbt, Box<dyn Error>> {
+		let mut tx_builder = wallet.build_tx();
+		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
 		let psbt = match tx_builder.finish() {
 			Ok(psbt) => psbt,
 			Err(err) => return Err(err.into()),
@@ -90,10 +205,52 @@ impl Broker {
 	pub fn add_utxos_to_psbt(
 		&self, psbt: &mut Psbt, max_count: u16, uniform_amount: Option<Amount>, fee: Amount,
 		payer: bool,
-	) -> Result<(), Box<dyn std::error::Error>> {
+	) -> Result<(), Box<dyn Error>> {
+		let mut wallets = self.wallets.lock().unwrap();
+		let wallet = wallets.get_mut(&self.pubkey).unwrap();
+		self._add_utxos_to_psbt(wallet, None, psbt, max_count, uniform_amount, fee, payer)
+	}
+
+	pub fn multisig_add_utxos_to_psbt(
+		&self, other: &PublicKey, psbt: &mut Psbt, max_count: u16, uniform_amount: Option<Amount>,
+		fee: Amount, payer: bool,
+	) -> Result<(), Box<dyn Error>> {
+		let mut wallets = self.wallets.lock().unwrap();
+		if let Some(wallet) = wallets.get_mut(other) {
+			self._add_utxos_to_psbt(
+				wallet,
+				Some(other),
+				psbt,
+				max_count,
+				uniform_amount,
+				fee,
+				payer,
+			)?;
+		}
+		Ok(())
+	}
+
+	fn _add_utxos_to_psbt(
+		&self, wallet: &mut PersistedWallet, other_opt: Option<&PublicKey>, psbt: &mut Psbt,
+		max_count: u16, uniform_amount: Option<Amount>, fee: Amount, payer: bool,
+	) -> Result<(), Box<dyn Error>> {
 		let mut count = 0;
 		let mut receiver_utxos_value = Amount::from_sat(0);
-		let mut wallet = self.wallet.lock().unwrap();
+
+		let redeem_script = if let Some(other) = other_opt {
+			Some(
+				bitcoin::blockdata::script::Builder::new()
+					.push_opcode(opcodes::all::OP_PUSHNUM_2)
+					.push_key(&self.pubkey.into())
+					.push_key(&other.clone().into())
+					.push_opcode(opcodes::all::OP_PUSHNUM_2)
+					.push_opcode(opcodes::all::OP_CHECKMULTISIG)
+					.into_script(),
+			)
+		} else {
+			None
+		};
+
 		let utxos: Vec<_> = wallet.list_unspent().collect();
 		for utxo in utxos {
 			let mut inserted = false;
@@ -128,7 +285,12 @@ impl Broker {
 					utxo.txout.value
 				);
 
-				psbt.inputs.push(Input { non_witness_utxo: Some(tx), ..Default::default() });
+				psbt.inputs.push(Input {
+					non_witness_utxo: Some(tx),
+					witness_utxo: Some(utxo.txout.clone()),
+					redeem_script: redeem_script.clone(),
+					..Default::default()
+				});
 				psbt.unsigned_tx.input.push(input);
 				receiver_utxos_value += utxo.txout.value;
 
@@ -166,8 +328,25 @@ impl Broker {
 		Ok(())
 	}
 
+	pub fn multisig_sign_psbt(
+		&self, other: &PublicKey, psbt: &mut Psbt,
+	) -> Result<(), Box<dyn Error>> {
+		let mut wallets = self.wallets.lock().unwrap();
+		if let Some(wallet) = wallets.get_mut(other) {
+			wallet.sign(psbt, SignOptions::default())?;
+		} else {
+			return Err("Multisig not found!".into());
+		}
+		Ok(())
+	}
+
 	pub fn sign_psbt(&self, psbt: &mut Psbt) -> Result<(), Box<dyn Error>> {
-		self.wallet.lock().unwrap().sign(psbt, SignOptions::default())?;
+		let mut wallets = self.wallets.lock().unwrap();
+		if let Some(wallet) = wallets.get_mut(&self.pubkey) {
+			wallet.sign(psbt, SignOptions::default())?;
+		} else {
+			return Err("Node wallet not found!".into());
+		}
 		Ok(())
 	}
 
@@ -193,48 +372,4 @@ impl Broker {
 		// self.broadcaster.broadcast_transactions(txs);
 		Ok(())
 	}
-}
-
-pub fn create_wallet(
-	seed_bytes: &[u8], network: Network,
-) -> Result<Wallet, Box<dyn std::error::Error>> {
-	let xprv = Xpriv::new_master(network, seed_bytes)
-		.map_err(|e| format!("Failed to derive master secret: {}", e))?;
-
-	let descriptor = Bip84(xprv, KeychainKind::External);
-	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
-
-	let wallet = Wallet::create(descriptor, change_descriptor)
-		.network(network)
-		.create_wallet_no_persist()
-		.map_err(|e| format!("Failed to set up wallet: {}", e))?;
-
-	Ok(wallet)
-}
-
-pub fn sync_wallet(
-	client: &Client, wallet: &mut Wallet, debug: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-	let latest = client.get_block_count()?;
-	let stored = wallet.latest_checkpoint().block_id().height as u64;
-	if debug {
-		println!("    -> WalletSyncBlock: (stored={} | latest={})", stored, latest);
-	}
-	for height in stored..latest {
-		let hash = client.get_block_hash(height)?;
-		let block = client.get_block(&hash)?;
-		wallet.apply_block(&block, height as u32)?;
-	}
-	if debug {
-		println!("    -> WalletSyncBlock: Done!");
-	}
-	Ok(())
-}
-
-pub fn wallet_total_balance(
-	bitcoind: &Client, wallet: &mut Wallet,
-) -> Result<Amount, Box<dyn std::error::Error>> {
-	sync_wallet(bitcoind, wallet, false)?;
-	let balance = wallet.balance();
-	Ok(balance.total())
 }

@@ -3,6 +3,9 @@ name = "batcher"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "batcher"
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 rand = "0.8"

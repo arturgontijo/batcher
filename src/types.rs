@@ -1,3 +1,4 @@
+use bdk_wallet::file_store::Store;
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::chaininterface::FeeEstimator;
 use lightning::chain::chainmonitor;
@@ -76,6 +77,8 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<MessageRouter>,
 	Arc<SimpleLogger>,
 >;
+
+pub(crate) type PersistedWallet = bdk_wallet::PersistedWallet<Store<bdk_wallet::ChangeSet>>;
 
 // pub(crate) type Wallet =
 // 	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<SimpleLogger>>;

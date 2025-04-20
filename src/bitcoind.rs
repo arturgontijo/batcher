@@ -1,6 +1,8 @@
-use std::{thread::sleep, time::Duration};
+use std::{error::Error, thread::sleep, time::Duration};
 
+use bitcoin::{Address, Amount};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
+use rand::{thread_rng, Rng};
 
 pub fn bitcoind_client(wallet: &str) -> Result<Client, bitcoincore_rpc::Error> {
 	let auth = Auth::UserPass("local".to_string(), "local".to_string());
@@ -10,7 +12,30 @@ pub fn bitcoind_client(wallet: &str) -> Result<Client, bitcoincore_rpc::Error> {
 	Ok(bitcoind)
 }
 
-pub fn wait_for_block(bitcoind: &Client, blocks: u64) -> Result<(), Box<dyn std::error::Error>> {
+pub fn fund_address(
+	client: &Client, address: Address, amount: Amount, utxos: u16,
+) -> Result<(), Box<dyn Error>> {
+	let mut rng = thread_rng();
+	for _ in 0..utxos {
+		// range -15% and +15%
+		let variation_factor = rng.gen_range(-0.15..=0.15);
+		let amount_u64 = amount.to_sat();
+		let random_amount = amount_u64 as f64 * (1.0 + variation_factor);
+		client.send_to_address(
+			&address,
+			Amount::from_sat(random_amount.round() as u64),
+			None,
+			None,
+			None,
+			None,
+			None,
+			None,
+		)?;
+	}
+	Ok(())
+}
+
+pub fn wait_for_block(bitcoind: &Client, blocks: u64) -> Result<(), Box<dyn Error>> {
 	let initial_block = bitcoind.get_block_count()?;
 	let target_block = initial_block + blocks;
 	loop {

@@ -186,8 +186,8 @@ impl CustomMessageHandler for BatchMessageHandler {
 		self.pending.lock().unwrap().drain(..).collect()
 	}
 
-	fn peer_disconnected(&self, their_node_id: PublicKey) {
-		println!("📩 peer_disconnected: {}", their_node_id);
+	fn peer_disconnected(&self, _their_node_id: PublicKey) {
+		// println!("📩 peer_disconnected: {}", their_node_id);
 	}
 
 	fn peer_connected(

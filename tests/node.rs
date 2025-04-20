@@ -1,63 +1,29 @@
-mod batch;
-mod bitcoind;
-mod broker;
-mod events;
-mod logger;
-mod messages;
-mod node;
-mod persister;
-mod types;
+mod common;
+
+use batcher::bitcoind;
+use batcher::wallet;
 
 use bdk_wallet::KeychainKind;
 use bitcoin::{
 	absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeRate, Network, Psbt,
 };
 use bitcoincore_rpc::RpcApi;
-use bitcoind::{bitcoind_client, wait_for_block};
-use broker::{create_wallet, wallet_total_balance};
-use node::{fund_node, Node};
-use rand::{thread_rng, Rng};
+use bitcoind::{bitcoind_client, fund_address, wait_for_block};
+use common::setup_nodes;
+use wallet::{create_wallet, wallet_total_balance};
 
-use std::{error::Error, sync::Arc, thread::sleep};
+use std::error::Error;
 use tokio::time::Duration;
 
-fn setup_nodes(
-	count: u8, mut port: u16, network: Network,
-) -> Result<Vec<Arc<Node>>, Box<dyn Error>> {
-	let mut rng = thread_rng();
-	let mut nodes = vec![];
-	for i in 0..count {
-		let seed: [u8; 32] = rng.gen();
-		let node = Arc::new(Node::new(
-			format!("node-{}", i),
-			&seed,
-			port,
-			network,
-			format!("data/wallet_{}.db", i),
-		)?);
-		let node_clone = node.clone();
-		tokio::spawn(async move { node_clone.start().await });
-		nodes.push(node);
-		port += 1;
-	}
-	sleep(Duration::from_secs(1));
-	Ok(nodes)
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread")]
+async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	let network = Network::Signet;
 
-	// Sender's node index
-	let sender_node_idx = 7;
-	// Sender must start the Batch workflow by selecting an initial Node
-	let initial_node_idx = 4;
-
-	let nodes = setup_nodes(8, 7777, network)?;
+	let nodes = setup_nodes(8, 7777, network).await?;
 
 	let bitcoind = bitcoind_client("miner")?;
 	for node in &nodes {
-		fund_node(&bitcoind, node, Amount::from_sat(1_000_000), 10).await?;
+		fund_address(&bitcoind, node.wallet_new_address()?, Amount::from_sat(1_000_000), 10)?;
 	}
 
 	wait_for_block(&bitcoind, 2)?;
@@ -85,6 +51,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 	tokio::time::sleep(Duration::from_millis(1_000)).await;
 
+	// Sender's node index
+	let starting_node_idx = 7;
+	// Sender must start the Batch workflow by selecting an initial Node
+	let initial_node_idx = 4;
+
 	// Starting Batch workflow
 	let mut receiver = create_wallet(&[255u8; 64], network)?;
 
@@ -99,17 +70,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	let max_participants = 7;
 
 	// Sender must connect to an initial Node
-	nodes[sender_node_idx].connect(&nodes[initial_node_idx]).await;
-	while !nodes[sender_node_idx].is_peer_connected(&nodes[initial_node_idx].node_id()) {
+	nodes[starting_node_idx].connect(&nodes[initial_node_idx]).await;
+	while !nodes[starting_node_idx].is_peer_connected(&nodes[initial_node_idx].node_id()) {
 		tokio::time::sleep(Duration::from_millis(250)).await;
 		println!(
 			"Connecting to {} -> {} ...",
-			nodes[sender_node_idx].alias(),
+			nodes[starting_node_idx].alias(),
 			nodes[initial_node_idx].alias()
 		);
 	}
 
-	nodes[sender_node_idx].init_psbt_batch(
+	nodes[starting_node_idx].init_psbt_batch(
 		nodes[initial_node_idx].node_id(),
 		script_pubkey,
 		amount,
@@ -121,10 +92,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 		max_utxo_count,
 	)?;
 
-	let mut batch_psbts = nodes[sender_node_idx].broker.get_batch_psbts()?;
+	let mut batch_psbts = nodes[starting_node_idx].broker.get_batch_psbts()?;
 	while batch_psbts.is_empty() {
 		wait_for_block(&bitcoind, 2)?;
-		batch_psbts = nodes[sender_node_idx].broker.get_batch_psbts()?;
+		batch_psbts = nodes[starting_node_idx].broker.get_batch_psbts()?;
 	}
 
 	// Sender has the final PSBT (signed by all participants) now
@@ -161,7 +132,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 	println!("\nSending Tx (id={})...\n", tx.compute_txid());
 
-	nodes[sender_node_idx].broadcast_transactions(&[&tx])?;
+	nodes[starting_node_idx].broadcast_transactions(&[&tx])?;
 	let tx_id = bitcoind.send_raw_transaction(&tx)?;
 	println!("Tx Sent (id={})\n", tx_id);
 
@@ -174,8 +145,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	let balance = wallet_total_balance(&bitcoind, &mut receiver)?;
 	println!(
 		"\n[{}][{}] Receiver Balances (b/a/delta): {} | {} | {}\n",
-		nodes[sender_node_idx].node_id(),
-		nodes[sender_node_idx].alias(),
+		nodes[starting_node_idx].node_id(),
+		nodes[starting_node_idx].alias(),
 		receiver_initial_balance,
 		balance,
 		balance - receiver_initial_balance,
@@ -184,7 +155,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	for (idx, node) in nodes.iter().enumerate() {
 		let before = nodes_balance[idx];
 		let balance = node.balance().confirmed;
-		if idx == sender_node_idx {
+		if idx == starting_node_idx {
 			println!(
 				"[{}][{}] Balances (b/a/delta)         : {} | {} | {}",
 				node.node_id(),
@@ -203,6 +174,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 				balance - before,
 			);
 		}
+	}
+
+    for node in &nodes {
+		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
+        node.stop()?;
 	}
 
 	Ok(())
