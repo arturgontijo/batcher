@@ -13,7 +13,7 @@ pub async fn setup_nodes(
 	for i in 0..count {
 		let node = Arc::new(Node::new(
 			format!("node-{}", i),
-			&[42+i; 32],
+			&[42 + i; 32],
 			port,
 			network,
 			format!("data/wallet_{}.db", i),
@@ -23,6 +23,6 @@ pub async fn setup_nodes(
 		nodes.push(node);
 		port += 1;
 	}
-    tokio::time::sleep(Duration::from_secs(1)).await;
+	tokio::time::sleep(Duration::from_secs(1)).await;
 	Ok(nodes)
 }

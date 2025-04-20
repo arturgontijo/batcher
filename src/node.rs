@@ -10,7 +10,6 @@ use bdk_wallet::Balance;
 use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use bitcoin::{Address, Amount, FeeRate, Psbt, ScriptBuf, Transaction};
-use bitcoincore_rpc::Client;
 use lightning::bitcoin::network::Network;
 use lightning::events::EventsProvider;
 use lightning::ln::channelmanager::ChainParameters;
@@ -177,10 +176,8 @@ impl Node {
 		self.broker.create_multisig(network, other, db_path)
 	}
 
-	pub fn multisig_sync(
-		&self, client: &Client, other: &PublicKey, debug: bool,
-	) -> Result<(), Box<dyn Error>> {
-		self.broker.multisig_sync(client, other, debug)
+	pub fn multisig_sync(&self, other: &PublicKey, debug: bool) -> Result<(), Box<dyn Error>> {
+		self.broker.multisig_sync(other, debug)
 	}
 
 	pub fn start(&self) -> Result<(), Box<dyn Error>> {
@@ -189,7 +186,8 @@ impl Node {
 			return Err("Node is already running!".into());
 		}
 
-		let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
+		let runtime =
+			Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
 
 		// Clone to move into tasks
 		let broker = self.broker.clone();
@@ -436,8 +434,8 @@ impl Node {
 		Ok(())
 	}
 
-	pub async fn sync_wallet(&self, client: &Client, debug: bool) -> Result<(), Box<dyn Error>> {
-		self.broker.sync_wallet(client, debug)
+	pub fn sync_wallet(&self, debug: bool) -> Result<(), Box<dyn Error>> {
+		self.broker.sync_wallet(debug)
 	}
 
 	pub fn balance(&self) -> Balance {

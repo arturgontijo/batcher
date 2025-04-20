@@ -34,7 +34,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	wait_for_block(&bitcoind, 2)?;
 
 	for node in &nodes {
-		node.sync_wallet(&bitcoind, true).await?;
+		node.sync_wallet(true)?;
 	}
 
 	for node in &nodes {
@@ -61,7 +61,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	// Multisig node must start the Batch workflow by selecting an initial Node
 	let initial_node_idx = 4;
 
-    // Sender must connect to an initial Node
+	// Sender must connect to an initial Node
 	nodes[starting_node_idx].connect(&nodes[initial_node_idx]).await;
 	while !nodes[starting_node_idx].is_peer_connected(&nodes[initial_node_idx].node_id()) {
 		tokio::time::sleep(Duration::from_millis(250)).await;
@@ -73,7 +73,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	}
 
 	// Starting Batch workflow
-	let mut receiver = create_wallet(&[255u8; 64], network)?;
+	let mut receiver = create_wallet(&[255u8; 64], network, "data/receiver.db".to_string())?;
 
 	let amount = Amount::from_sat(777_777);
 	let script_pubkey =
@@ -108,7 +108,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	fund_address(&bitcoind, multisig_funding_addr, Amount::from_sat(1_000_000), 10)?;
 	wait_for_block(&bitcoind, 2)?;
 
-	nodes[starting_node_idx].multisig_sync(&bitcoind, &sender_pubkey, true)?;
+	nodes[starting_node_idx].multisig_sync(&sender_pubkey, true)?;
 	let multisig_balance = wallet_total_balance(&bitcoind, &mut sender_multisig)?;
 
 	println!(
@@ -150,7 +150,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	let tx = psbt.clone().extract_tx()?;
 
 	for node in &nodes {
-		node.sync_wallet(&bitcoind, false).await?;
+		node.sync_wallet(false)?;
 	}
 
 	let receiver_initial_balance = wallet_total_balance(&bitcoind, &mut receiver)?;
@@ -180,7 +180,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	wait_for_block(&bitcoind, 3)?;
 
 	for node in &nodes {
-		node.sync_wallet(&bitcoind, false).await?;
+		node.sync_wallet(false)?;
 	}
 
 	let balance = wallet_total_balance(&bitcoind, &mut receiver)?;
@@ -218,9 +218,9 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 		);
 	}
 
-    for node in &nodes {
+	for node in &nodes {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
-        node.stop()?;
+		node.stop()?;
 	}
 
 	Ok(())

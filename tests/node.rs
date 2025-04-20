@@ -29,7 +29,7 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	wait_for_block(&bitcoind, 2)?;
 
 	for node in &nodes {
-		node.sync_wallet(&bitcoind, true).await?;
+		node.sync_wallet(true)?;
 	}
 
 	for node in &nodes {
@@ -57,7 +57,7 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	let initial_node_idx = 4;
 
 	// Starting Batch workflow
-	let mut receiver = create_wallet(&[255u8; 64], network)?;
+	let mut receiver = create_wallet(&[255u8; 64], network, "data/receiver.db".to_string())?;
 
 	let amount = Amount::from_sat(777_777);
 	let script_pubkey =
@@ -109,7 +109,7 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	let tx = psbt.clone().extract_tx()?;
 
 	for node in &nodes {
-		node.sync_wallet(&bitcoind, false).await?;
+		node.sync_wallet(false)?;
 	}
 
 	let receiver_initial_balance = wallet_total_balance(&bitcoind, &mut receiver)?;
@@ -139,7 +139,7 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	wait_for_block(&bitcoind, 3)?;
 
 	for node in &nodes {
-		node.sync_wallet(&bitcoind, false).await?;
+		node.sync_wallet(false)?;
 	}
 
 	let balance = wallet_total_balance(&bitcoind, &mut receiver)?;
@@ -176,9 +176,9 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 		}
 	}
 
-    for node in &nodes {
+	for node in &nodes {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
-        node.stop()?;
+		node.stop()?;
 	}
 
 	Ok(())

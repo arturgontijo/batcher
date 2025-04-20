@@ -19,7 +19,7 @@ use bitcoin::{
 	secp256k1::{PublicKey, SecretKey},
 	Address, FeeRate, NetworkKind, Psbt, ScriptBuf, Transaction, TxIn, TxOut,
 };
-use bitcoincore_rpc::Client;
+use bitcoincore_rpc::{Auth, Client};
 
 use crate::{
 	messages::{BatchMessage, BatchMessageHandler},
@@ -38,6 +38,8 @@ pub struct Broker {
 	pub wif: String,
 	pub wallets: Arc<Mutex<HashMap<PublicKey, PersistedWallet>>>,
 	pub batch_psbts: Arc<Mutex<Vec<String>>>,
+	pub bitcoind_client: Arc<Client>,
+	pub db_path: String,
 }
 
 impl Broker {
@@ -53,11 +55,14 @@ impl Broker {
 			bitcoin::PrivateKey { compressed: true, network: NetworkKind::Test, inner: secret_key }
 				.to_wif();
 
-		let wallet = Self::create_wallet(seed_bytes, network, db_path)?;
+		let wallet = Self::create_wallet(seed_bytes, network, db_path.clone())?;
 
 		let wallets = Arc::new(Mutex::new(HashMap::from([(pubkey, wallet)])));
 
 		let batch_psbts = Arc::new(Mutex::new(vec![]));
+
+		let auth = Auth::UserPass("local".to_string(), "local".to_string());
+		let bitcoind_client = Arc::new(Client::new("http://0.0.0.0:38332", auth.clone())?);
 
 		Ok(Broker {
 			node_id,
@@ -67,6 +72,8 @@ impl Broker {
 			wif,
 			wallets,
 			batch_psbts,
+			bitcoind_client,
+			db_path,
 		})
 	}
 
@@ -116,26 +123,24 @@ impl Broker {
 
 		let wallet = match wallet_opt {
 			Some(wallet) => wallet,
-			None => Wallet::create(descriptor.clone(), change_descriptor.clone())
+			None => Wallet::create(descriptor, change_descriptor)
 				.network(network)
 				.create_wallet(&mut db)?,
 		};
 		Ok(wallet)
 	}
 
-	pub fn sync_wallet(&self, client: &Client, debug: bool) -> Result<(), Box<dyn Error>> {
+	pub fn sync_wallet(&self, debug: bool) -> Result<(), Box<dyn Error>> {
 		let mut binding = self.wallets.lock().unwrap();
 		let wallet = binding.get_mut(&self.pubkey).unwrap();
-		sync_wallet(client, wallet, debug)?;
+		sync_wallet(&self.bitcoind_client, wallet, debug)?;
 		Ok(())
 	}
 
-	pub fn multisig_sync(
-		&self, client: &Client, other: &PublicKey, debug: bool,
-	) -> Result<(), Box<dyn Error>> {
+	pub fn multisig_sync(&self, other: &PublicKey, debug: bool) -> Result<(), Box<dyn Error>> {
 		let mut multisigs = self.wallets.lock().unwrap();
 		if let Some(wallet) = multisigs.get_mut(other) {
-			sync_wallet(client, wallet, debug)?;
+			sync_wallet(&self.bitcoind_client, wallet, debug)?;
 		}
 		Ok(())
 	}
