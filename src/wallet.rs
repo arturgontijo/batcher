@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use bdk_wallet::{template::Bip84, KeychainKind};
+use bdk_wallet::{rusqlite::Connection, template::Bip84, KeychainKind};
 use bitcoin::{bip32::Xpriv, secp256k1::PublicKey, Amount, Network};
 use bitcoincore_rpc::{Client, RpcApi};
 
@@ -14,8 +14,10 @@ pub fn create_wallet(
 
 	let descriptor = Bip84(xprv, KeychainKind::External);
 	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
+	let mut conn = Connection::open(db_path)?;
 
-	let wallet = Broker::create_persisted_wallet(network, db_path, descriptor, change_descriptor)?;
+	let wallet =
+		Broker::create_persisted_wallet(network, &mut conn, descriptor, change_descriptor)?;
 	Ok(wallet)
 }
 
@@ -27,10 +29,13 @@ pub fn create_sender_multisig(
 	// Change is controlled just by other
 	let change_descriptor = format!("wpkh({})", sender_wif);
 
+	let mut conn = Connection::open(db_path)?;
+
 	// If we want to also use 2-of-2 for change
 	// let change_descriptor = format!("wsh(sortedmulti(2,{},{}))", node_pubkey, sender_pubkey);
 
-	let wallet = Broker::create_persisted_wallet(network, db_path, descriptor, change_descriptor)?;
+	let wallet =
+		Broker::create_persisted_wallet(network, &mut conn, descriptor, change_descriptor)?;
 	Ok(wallet)
 }
 

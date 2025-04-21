@@ -7,7 +7,7 @@ use std::{
 use bdk_wallet::{
 	bitcoin::{bip32::Xpriv, Amount, Network},
 	descriptor::IntoWalletDescriptor,
-	file_store::Store,
+	rusqlite::Connection,
 	template::Bip84,
 	Balance, KeychainKind, SignOptions, Wallet,
 };
@@ -27,8 +27,6 @@ use crate::{
 	wallet::sync_wallet,
 };
 
-const DB_MAGIC: &str = "bdk-rpc-wallet-example";
-
 #[derive(Clone)]
 pub struct Broker {
 	pub node_id: PublicKey,
@@ -39,7 +37,7 @@ pub struct Broker {
 	pub wallets: Arc<Mutex<HashMap<PublicKey, PersistedWallet>>>,
 	pub batch_psbts: Arc<Mutex<Vec<String>>>,
 	pub bitcoind_client: Arc<Client>,
-	pub db_path: String,
+	pub persister: Arc<Mutex<Connection>>,
 }
 
 impl Broker {
@@ -47,6 +45,9 @@ impl Broker {
 		node_id: PublicKey, node_alias: String, seed_bytes: &[u8; 32], network: Network,
 		db_path: String, custom_message_handler: Arc<BatchMessageHandler>,
 	) -> Result<Self, Box<dyn Error>> {
+		let auth = Auth::UserPass("local".to_string(), "local".to_string());
+		let bitcoind_client = Arc::new(Client::new("http://0.0.0.0:38332", auth.clone())?);
+
 		let secp = Secp256k1::new();
 		let secret_key = SecretKey::from_slice(seed_bytes)?;
 		let pubkey = PublicKey::from_secret_key(&secp, &secret_key);
@@ -55,14 +56,12 @@ impl Broker {
 			bitcoin::PrivateKey { compressed: true, network: NetworkKind::Test, inner: secret_key }
 				.to_wif();
 
-		let wallet = Self::create_wallet(seed_bytes, network, db_path.clone())?;
+		let mut persister = Connection::open(db_path)?;
+		let wallet = Self::create_wallet(seed_bytes, network, &mut persister)?;
 
 		let wallets = Arc::new(Mutex::new(HashMap::from([(pubkey, wallet)])));
 
 		let batch_psbts = Arc::new(Mutex::new(vec![]));
-
-		let auth = Auth::UserPass("local".to_string(), "local".to_string());
-		let bitcoind_client = Arc::new(Client::new("http://0.0.0.0:38332", auth.clone())?);
 
 		Ok(Broker {
 			node_id,
@@ -73,18 +72,18 @@ impl Broker {
 			wallets,
 			batch_psbts,
 			bitcoind_client,
-			db_path,
+			persister: Arc::new(Mutex::new(persister)),
 		})
 	}
 
 	fn create_wallet(
-		seed_bytes: &[u8; 32], network: Network, db_path: String,
+		seed_bytes: &[u8; 32], network: Network, persister: &mut Connection,
 	) -> Result<PersistedWallet, Box<dyn Error>> {
 		let xprv = Xpriv::new_master(network, seed_bytes)
 			.map_err(|e| format!("Failed to derive master secret: {}", e))?;
 		Self::create_persisted_wallet(
 			network,
-			db_path,
+			persister,
 			Bip84(xprv, KeychainKind::External),
 			Bip84(xprv, KeychainKind::Internal),
 		)
@@ -102,30 +101,28 @@ impl Broker {
 		// If we want to also use 2-of-2 for change
 		// let change_descriptor = format!("wsh(sortedmulti(2,{},{}))", other, self.pubkey);
 
+		let mut persister = Connection::open(db_path)?;
 		let wallet =
-			Self::create_persisted_wallet(network, db_path, descriptor, change_descriptor)?;
+			Self::create_persisted_wallet(network, &mut persister, descriptor, change_descriptor)?;
 		wallets.insert(*other, wallet);
 		Ok(())
 	}
 
 	pub fn create_persisted_wallet<D: IntoWalletDescriptor + Send + Clone + 'static>(
-		network: Network, db_path: String, descriptor: D, change_descriptor: D,
+		network: Network, persister: &mut Connection, descriptor: D, change_descriptor: D,
 	) -> Result<PersistedWallet, Box<dyn Error>> {
-		let mut db =
-			Store::<bdk_wallet::ChangeSet>::open_or_create_new(DB_MAGIC.as_bytes(), db_path)?;
-
 		let wallet_opt = Wallet::load()
 			.descriptor(KeychainKind::External, Some(descriptor.clone()))
 			.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
 			.extract_keys()
 			.check_network(network)
-			.load_wallet(&mut db)?;
+			.load_wallet(persister)?;
 
 		let wallet = match wallet_opt {
 			Some(wallet) => wallet,
 			None => Wallet::create(descriptor, change_descriptor)
 				.network(network)
-				.create_wallet(&mut db)?,
+				.create_wallet(persister)?,
 		};
 		Ok(wallet)
 	}
@@ -134,6 +131,8 @@ impl Broker {
 		let mut binding = self.wallets.lock().unwrap();
 		let wallet = binding.get_mut(&self.pubkey).unwrap();
 		sync_wallet(&self.bitcoind_client, wallet, debug)?;
+		let mut persister = self.persister.lock().unwrap();
+		wallet.persist(&mut persister)?;
 		Ok(())
 	}
 
@@ -166,8 +165,8 @@ impl Broker {
 	}
 
 	pub fn multisig_balance(&self, other: &PublicKey) -> Result<Balance, Box<dyn Error>> {
-		let mut multisigs = self.wallets.lock().unwrap();
-		match multisigs.get_mut(other) {
+		let multisigs = self.wallets.lock().unwrap();
+		match multisigs.get(other) {
 			Some(wallet) => Ok(wallet.balance()),
 			None => Err("Multisig not found!".into()),
 		}

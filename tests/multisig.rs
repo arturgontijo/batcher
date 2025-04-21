@@ -24,7 +24,7 @@ use tokio::time::Duration;
 async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	let network = Network::Signet;
 
-	let nodes = setup_nodes(8, 7777, network).await?;
+	let nodes = setup_nodes(10, 7777, network).await?;
 
 	let bitcoind = bitcoind_client("miner")?;
 	for node in &nodes {
@@ -41,28 +41,29 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 		println!("[{}][{}] Balance: {}", node.node_id(), node.alias(), node.balance().total());
 	}
 
-	//                    (500k:0)- N2 -(500k:0)    N7 (Sender)
-	//                   /                      \  /
-	//   N0 -(500k:0)- N1                        N4 -(500k:0)- N5 -(500k:0)- N6
-	//                   \                      /
-	//                    (500k:0)- N3 -(500k:0)
+	//      N5     N6               N7
+	//        \  /                 /
+	//   N0 -- N1 -- N2 -- N3 -- N4
+	//                \            \
+	//                 N8           N9
 	nodes[0].connect(&nodes[1]).await;
 	nodes[1].connect(&nodes[2]).await;
-	nodes[1].connect(&nodes[3]).await;
-	nodes[2].connect(&nodes[4]).await;
+	nodes[1].connect(&nodes[5]).await;
+	nodes[1].connect(&nodes[6]).await;
+	nodes[2].connect(&nodes[3]).await;
+	nodes[2].connect(&nodes[8]).await;
 	nodes[3].connect(&nodes[4]).await;
-	nodes[4].connect(&nodes[5]).await;
-	nodes[5].connect(&nodes[6]).await;
+	nodes[4].connect(&nodes[7]).await;
+	nodes[4].connect(&nodes[9]).await;
 
 	tokio::time::sleep(Duration::from_millis(1_000)).await;
 
 	// Multisig party node index
-	let starting_node_idx = 7;
+	let starting_node_idx = 6;
 	// Multisig node must start the Batch workflow by selecting an initial Node
-	let initial_node_idx = 4;
+	let initial_node_idx = 1;
 
-	// Sender must connect to an initial Node
-	nodes[starting_node_idx].connect(&nodes[initial_node_idx]).await;
+	// Multisig party node must be connected to an initial Node
 	while !nodes[starting_node_idx].is_peer_connected(&nodes[initial_node_idx].node_id()) {
 		tokio::time::sleep(Duration::from_millis(250)).await;
 		println!(
@@ -83,7 +84,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	let locktime: LockTime = LockTime::ZERO;
 	let max_utxo_count = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
-	let max_participants = 7;
+	let max_participants = 10;
 
 	let secp = Secp256k1::new();
 	let secret_key = SecretKey::from_slice(&[77u8; 32])?;
@@ -164,11 +165,11 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	for input in tx.input.iter() {
 		let tx_info = bitcoind.get_raw_transaction_info(&input.previous_output.txid, None)?;
 		let value = tx_info.vout[input.previous_output.vout as usize].value;
-		println!("====> Inputs  ({})", value);
+		println!("====> In  ({})", value);
 	}
 
 	for output in tx.output.iter() {
-		println!("====> Outputs ({})", output.value);
+		println!("====> Out ({})", output.value);
 	}
 
 	println!("\nSending Tx (id={})...\n", tx.compute_txid());

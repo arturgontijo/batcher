@@ -123,11 +123,11 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	for input in tx.input.iter() {
 		let tx_info = bitcoind.get_raw_transaction_info(&input.previous_output.txid, None)?;
 		let value = tx_info.vout[input.previous_output.vout as usize].value;
-		println!("====> Inputs  ({})", value);
+		println!("====> In  ({})", value);
 	}
 
 	for output in tx.output.iter() {
-		println!("====> Outputs ({})", output.value);
+		println!("====> Out ({})", output.value);
 	}
 
 	println!("\nSending Tx (id={})...\n", tx.compute_txid());
