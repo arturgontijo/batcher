@@ -13,13 +13,14 @@ use common::setup_nodes;
 use wallet::{create_wallet, wallet_total_balance};
 
 use std::error::Error;
+use std::thread::sleep;
 use tokio::time::Duration;
 
-#[tokio::test(flavor = "multi_thread")]
-async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
+#[test]
+fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	let network = Network::Signet;
 
-	let nodes = setup_nodes(8, 7777, network).await?;
+	let nodes = setup_nodes(8, 7777, network)?;
 
 	let bitcoind = bitcoind_client("miner")?;
 	for node in &nodes {
@@ -41,15 +42,15 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	//   N0 -(500k:0)- N1                        N4 -(500k:0)- N5 -(500k:0)- N6
 	//                   \                      /
 	//                    (500k:0)- N3 -(500k:0)
-	nodes[0].connect(&nodes[1]).await;
-	nodes[1].connect(&nodes[2]).await;
-	nodes[1].connect(&nodes[3]).await;
-	nodes[2].connect(&nodes[4]).await;
-	nodes[3].connect(&nodes[4]).await;
-	nodes[4].connect(&nodes[5]).await;
-	nodes[5].connect(&nodes[6]).await;
+	nodes[0].connect(&nodes[1])?;
+	nodes[1].connect(&nodes[2])?;
+	nodes[1].connect(&nodes[3])?;
+	nodes[2].connect(&nodes[4])?;
+	nodes[3].connect(&nodes[4])?;
+	nodes[4].connect(&nodes[5])?;
+	nodes[5].connect(&nodes[6])?;
 
-	tokio::time::sleep(Duration::from_millis(1_000)).await;
+	sleep(Duration::from_millis(1_000));
 
 	// Sender's node index
 	let starting_node_idx = 7;
@@ -70,9 +71,9 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	let max_participants = 7;
 
 	// Sender must connect to an initial Node
-	nodes[starting_node_idx].connect(&nodes[initial_node_idx]).await;
+	nodes[starting_node_idx].connect(&nodes[initial_node_idx])?;
 	while !nodes[starting_node_idx].is_peer_connected(&nodes[initial_node_idx].node_id()) {
-		tokio::time::sleep(Duration::from_millis(250)).await;
+		sleep(Duration::from_millis(250));
 		println!(
 			"Connecting to {} -> {} ...",
 			nodes[starting_node_idx].alias(),
@@ -103,7 +104,7 @@ async fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	assert!(batch_psbts.len() == 1);
 	let psbt_hex = batch_psbts.first().unwrap();
 
-	let psbt = Psbt::deserialize(&hex::decode(psbt_hex).unwrap()).unwrap();
+	let psbt = Psbt::deserialize(&psbt_hex).unwrap();
 
 	println!("Extracting Tx...\n");
 	let tx = psbt.clone().extract_tx()?;

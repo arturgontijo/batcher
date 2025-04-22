@@ -12,6 +12,7 @@ use rand::thread_rng;
 use tokio::net::TcpStream;
 
 use crate::broker::Broker;
+use crate::logger::print_pubkey;
 use crate::messages::BatchMessage;
 use crate::types::PeerManager;
 
@@ -24,42 +25,71 @@ pub(crate) fn process_batch_messages(
 		receiver_node_id: _,
 		uniform_amount,
 		fee_per_participant,
+		max_utxo_per_participant,
 		max_participants,
 		participants,
 		endpoints,
-		psbt_hex,
+		not_participants,
+		psbt,
 		sign,
 	} = msg
 	{
 		println!(
-			"[{}][{}] BatchPsbt: sender={} | uni_amt={} | fee={} | max_p={} | pts={} | ep={} | len={} | sign={}",
+			"[{}][{}] BatchPsbt: sender={} | uni_amt={} | fee={} | utxos={} | max_p={} | pts={} | ep={} | n_pts={} | len={} | sign={}",
 			node_id,
 			node_alias,
-			sender_node_id,
+			print_pubkey(&sender_node_id),
 			uniform_amount,
 			fee_per_participant,
+			max_utxo_per_participant,
 			max_participants,
 			participants.len(),
 			endpoints.len(),
-			psbt_hex.len(),
+			not_participants.len(),
+			psbt.len(),
 			sign,
 		);
 
-		let mut psbt = Psbt::deserialize(&hex::decode(psbt_hex).unwrap()).unwrap();
+		let mut psbt = Psbt::deserialize(&psbt).unwrap();
 
 		let mut participants = participants.clone();
 		let mut endpoints = endpoints.clone();
+		let mut not_participants = not_participants.clone();
 
-		// Not a participant yet
-		if !sign && !participants.contains(node_id) {
-			participants.push(*node_id);
-			endpoints.push(node_endpoint.clone());
-			// Add node's inputs/outputs and route it to the next node
-			let fee = Amount::from_sat(fee_per_participant);
+		// Can we participate?
+		let mut can_participate = false;
+		let mut utxos_count = 0;
+		let mut utxos_value = Amount::ZERO;
+		for utxo in broker.list_unspent()? {
+			utxos_value += utxo.txout.value;
+			utxos_count += 1;
+			if utxos_count > 1 && utxos_value.to_sat() > uniform_amount {
+				can_participate = true;
+				break;
+			}
+		}
+		// ------
 
-			let uniform_amount_opt =
-				if uniform_amount > 0 { Some(Amount::from_sat(uniform_amount)) } else { None };
-			broker.add_utxos_to_psbt(&mut psbt, 2, uniform_amount_opt, fee, false)?;
+		if can_participate {
+			// Not a participant yet
+			if !sign && !participants.contains(node_id) {
+				participants.push(*node_id);
+				endpoints.push(node_endpoint.clone());
+				// Add node's inputs/outputs and route it to the next node
+				let fee = Amount::from_sat(fee_per_participant);
+
+				let uniform_amount_opt =
+					if uniform_amount > 0 { Some(Amount::from_sat(uniform_amount)) } else { None };
+				broker.add_utxos_to_psbt(
+					&mut psbt,
+					max_utxo_per_participant,
+					uniform_amount_opt,
+					fee,
+					false,
+				)?;
+			}
+		} else if !participants.contains(node_id) && !not_participants.contains(node_id) {
+			not_participants.push(*node_id);
 		}
 
 		let mut sign = sign;
@@ -98,11 +128,14 @@ pub(crate) fn process_batch_messages(
 
 		if !sign {
 			let mut next_node_id = None;
-			for peer in &peers {
-				if participants.contains(&peer.counterparty_node_id) {
+			for pd in &peers {
+				if participants.contains(&pd.counterparty_node_id) {
 					continue;
 				}
-				next_node_id = Some(peer.counterparty_node_id);
+				if not_participants.contains(&pd.counterparty_node_id) {
+					continue;
+				}
+				next_node_id = Some(pd.counterparty_node_id);
 				break;
 			}
 
@@ -111,16 +144,16 @@ pub(crate) fn process_batch_messages(
 				if peers.len() == 1 {
 					next_node_id = Some(peers[0].counterparty_node_id);
 				}
-				for peer in peers {
-					if peer.counterparty_node_id == sender_node_id {
+				for pd in peers {
+					if pd.counterparty_node_id == sender_node_id {
 						continue;
 					}
-					next_node_id = Some(peer.counterparty_node_id);
+					next_node_id = Some(pd.counterparty_node_id);
 					break;
 				}
 			}
 
-			let psbt_hex = psbt.serialize_hex();
+			let psbt = psbt.serialize();
 
 			let next_node_id = next_node_id.unwrap();
 			let msg = BatchMessage::BatchPsbt {
@@ -128,10 +161,12 @@ pub(crate) fn process_batch_messages(
 				receiver_node_id: next_node_id,
 				uniform_amount,
 				fee_per_participant,
+				max_utxo_per_participant,
 				max_participants,
 				participants,
 				endpoints,
-				psbt_hex,
+				not_participants,
+				psbt,
 				sign: false,
 			};
 
@@ -145,7 +180,7 @@ pub(crate) fn process_batch_messages(
 				endpoints.retain(|ep| ep != &node_endpoint.clone());
 			}
 
-			let psbt_hex = psbt.serialize_hex();
+			let psbt = psbt.serialize();
 
 			// Do we need more signatures?
 			if !participants.is_empty() {
@@ -182,10 +217,12 @@ pub(crate) fn process_batch_messages(
 						receiver_node_id: next_signer_node_id,
 						uniform_amount,
 						fee_per_participant,
+						max_utxo_per_participant,
 						max_participants,
 						participants,
 						endpoints,
-						psbt_hex,
+						not_participants,
+						psbt,
 						sign: true,
 					};
 					broker.send(next_signer_node_id, msg)?;
@@ -200,9 +237,9 @@ pub(crate) fn process_batch_messages(
 					"[{}][{}] BatchPsbt: PSBT was signed by all participants! (len={})",
 					node_id,
 					node_alias,
-					psbt_hex.len()
+					psbt.len()
 				);
-				broker.push_to_batch_psbts(psbt_hex).unwrap();
+				broker.push_to_batch_psbts(psbt).unwrap();
 			}
 		}
 	}

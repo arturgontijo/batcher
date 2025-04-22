@@ -1,12 +1,12 @@
 use bitcoin::Network;
 use node::Node;
 
-use std::{error::Error, sync::Arc};
+use std::{error::Error, sync::Arc, thread::sleep};
 use tokio::time::Duration;
 
 use batcher::node;
 
-pub async fn setup_nodes(
+pub fn setup_nodes(
 	count: u8, mut port: u16, network: Network,
 ) -> Result<Vec<Arc<Node>>, Box<dyn Error>> {
 	let mut nodes = vec![];
@@ -23,6 +23,6 @@ pub async fn setup_nodes(
 		nodes.push(node);
 		port += 1;
 	}
-	tokio::time::sleep(Duration::from_secs(1)).await;
+	sleep(Duration::from_secs(1));
 	Ok(nodes)
 }

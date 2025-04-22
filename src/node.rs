@@ -298,17 +298,24 @@ impl Node {
 		self.peer_manager.peer_by_node_id(their_node_id).is_some()
 	}
 
-	pub async fn connect(&self, other: &Node) {
-		let other_id = other.node_id;
-		let other_endpoint = other.endpoint.clone();
-		let peer_manager = self.peer_manager.clone();
-		tokio::spawn(async move {
-			let stream = TcpStream::connect(&other_endpoint).await.expect("Failed to connect");
-			match stream.into_std() {
-				Ok(std_stream) => setup_outbound(peer_manager.clone(), other_id, std_stream).await,
-				Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
-			}
-		});
+	pub fn connect(&self, other: &Node) -> Result<(), Box<dyn Error>> {
+		let runtime_lock = self.runtime.read().unwrap();
+		if let Some(runtime) = runtime_lock.as_ref() {
+			let other_id = other.node_id;
+			let other_endpoint = other.endpoint.clone();
+			let peer_manager = self.peer_manager.clone();
+			runtime.spawn(async move {
+				let stream = TcpStream::connect(&other_endpoint).await.expect("Failed to connect");
+				match stream.into_std() {
+					Ok(std_stream) => {
+						setup_outbound(peer_manager.clone(), other_id, std_stream).await
+					},
+					Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
+				}
+			});
+			return Ok(());
+		}
+		Err("Connect has failed!".into())
 	}
 
 	pub fn build_psbt(
@@ -320,7 +327,7 @@ impl Node {
 	pub fn init_psbt_batch(
 		&self, their_node_id: PublicKey, output_script: ScriptBuf, amount: Amount,
 		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
-		max_participants: u8, max_utxo_count: u16,
+		max_participants: u8, max_utxo_per_participant: u8,
 	) -> Result<(), Box<dyn Error>> {
 		self.peer_manager
 			.peer_by_node_id(&their_node_id)
@@ -331,7 +338,7 @@ impl Node {
 		// Initiator must cover all the batch fees
 		let total_fee = fee_per_participant * (max_participants as u64);
 
-		self.add_utxos_to_psbt(&mut psbt, max_utxo_count, None, total_fee, true)?;
+		self.add_utxos_to_psbt(&mut psbt, max_utxo_per_participant + 1, None, total_fee, true)?;
 
 		let fee_per_participant = fee_per_participant.to_sat();
 		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
@@ -341,10 +348,12 @@ impl Node {
 			receiver_node_id: their_node_id,
 			uniform_amount,
 			fee_per_participant,
+			max_utxo_per_participant,
 			max_participants: max_participants + 1,
 			participants: vec![self.node_id()],
 			endpoints: vec![self.endpoint()],
-			psbt_hex: psbt.serialize_hex(),
+			not_participants: vec![],
+			psbt: psbt.serialize(),
 			sign: false,
 		};
 
@@ -356,7 +365,7 @@ impl Node {
 	pub fn init_multisig_psbt_batch(
 		&self, other: &PublicKey, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate,
 		locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
-		max_participants: u8, max_utxo_count: u16,
+		max_participants: u8, max_utxo_per_participant: u8,
 	) -> Result<(), Box<dyn Error>> {
 		let mut psbt =
 			self.broker.multisig_build_psbt(other, output_script, amount, fee_rate, locktime)?;
@@ -364,12 +373,19 @@ impl Node {
 		// Initiator must cover all the batch fees
 		let total_fee = fee_per_participant * (max_participants as u64);
 
-		self.multisig_add_utxos_to_psbt(other, &mut psbt, max_utxo_count, None, total_fee, true)?;
+		self.multisig_add_utxos_to_psbt(
+			other,
+			&mut psbt,
+			max_utxo_per_participant + 1,
+			None,
+			total_fee,
+			true,
+		)?;
 
 		// Adding node's wallet UTXOs
 		self.add_utxos_to_psbt(
 			&mut psbt,
-			max_utxo_count,
+			max_utxo_per_participant,
 			Some(amount),
 			fee_per_participant,
 			false,
@@ -384,10 +400,12 @@ impl Node {
 				receiver_node_id: pd.counterparty_node_id,
 				uniform_amount,
 				fee_per_participant,
+				max_utxo_per_participant,
 				max_participants,
 				participants: vec![self.node_id()],
 				endpoints: vec![self.endpoint()],
-				psbt_hex: psbt.serialize_hex(),
+				not_participants: vec![],
+				psbt: psbt.serialize(),
 				sign: false,
 			};
 			self.broker.send(pd.counterparty_node_id, batch_psbt)?;
@@ -401,7 +419,7 @@ impl Node {
 	fn _psbt_batch(
 		&self, their_node_id: PublicKey, output_script: ScriptBuf, amount: Amount,
 		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
-		max_participants: u8, max_utxo_count: u16,
+		max_participants: u8, max_utxo_per_participant: u8,
 	) -> Result<(), Box<dyn Error>> {
 		self.peer_manager
 			.peer_by_node_id(&their_node_id)
@@ -412,7 +430,7 @@ impl Node {
 		// Initiator must cover all the batch fees
 		let total_fee = fee_per_participant * (max_participants as u64);
 
-		self.add_utxos_to_psbt(&mut psbt, max_utxo_count, None, total_fee, true)?;
+		self.add_utxos_to_psbt(&mut psbt, max_utxo_per_participant + 1, None, total_fee, true)?;
 
 		let fee_per_participant = fee_per_participant.to_sat();
 		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
@@ -422,10 +440,12 @@ impl Node {
 			receiver_node_id: their_node_id,
 			uniform_amount,
 			fee_per_participant,
+			max_utxo_per_participant,
 			max_participants: max_participants + 1,
 			participants: vec![self.node_id()],
 			endpoints: vec![self.endpoint()],
-			psbt_hex: psbt.serialize_hex(),
+			not_participants: vec![],
+			psbt: psbt.serialize(),
 			sign: false,
 		};
 
@@ -455,14 +475,14 @@ impl Node {
 	}
 
 	pub fn add_utxos_to_psbt(
-		&self, psbt: &mut Psbt, max_count: u16, uniform_amount: Option<Amount>, fee: Amount,
+		&self, psbt: &mut Psbt, max_count: u8, uniform_amount: Option<Amount>, fee: Amount,
 		payer: bool,
 	) -> Result<(), Box<dyn Error>> {
 		self.broker.add_utxos_to_psbt(psbt, max_count, uniform_amount, fee, payer)
 	}
 
 	pub fn multisig_add_utxos_to_psbt(
-		&self, other: &PublicKey, psbt: &mut Psbt, max_count: u16, uniform_amount: Option<Amount>,
+		&self, other: &PublicKey, psbt: &mut Psbt, max_count: u8, uniform_amount: Option<Amount>,
 		fee: Amount, payer: bool,
 	) -> Result<(), Box<dyn Error>> {
 		self.broker.multisig_add_utxos_to_psbt(other, psbt, max_count, uniform_amount, fee, payer)

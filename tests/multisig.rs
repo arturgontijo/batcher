@@ -18,16 +18,21 @@ use common::setup_nodes;
 use wallet::{create_sender_multisig, create_wallet, wallet_total_balance};
 
 use std::error::Error;
+use std::thread::sleep;
 use tokio::time::Duration;
 
-#[tokio::test(flavor = "multi_thread")]
-async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
+#[test]
+fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	let network = Network::Signet;
 
-	let nodes = setup_nodes(10, 7777, network).await?;
+	let nodes = setup_nodes(12, 7777, network)?;
 
 	let bitcoind = bitcoind_client("miner")?;
-	for node in &nodes {
+	for (idx, node) in nodes.iter().enumerate() {
+		// N2 and N10 must have no UTXOs
+		if idx == 2 || idx == 10 {
+			continue;
+		}
 		fund_address(&bitcoind, node.wallet_new_address()?, Amount::from_sat(1_000_000), 10)?;
 	}
 
@@ -41,22 +46,24 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 		println!("[{}][{}] Balance: {}", node.node_id(), node.alias(), node.balance().total());
 	}
 
-	//      N5     N6               N7
+	//      N5     N6 -- N7         N8
 	//        \  /                 /
 	//   N0 -- N1 -- N2 -- N3 -- N4
 	//                \            \
-	//                 N8           N9
-	nodes[0].connect(&nodes[1]).await;
-	nodes[1].connect(&nodes[2]).await;
-	nodes[1].connect(&nodes[5]).await;
-	nodes[1].connect(&nodes[6]).await;
-	nodes[2].connect(&nodes[3]).await;
-	nodes[2].connect(&nodes[8]).await;
-	nodes[3].connect(&nodes[4]).await;
-	nodes[4].connect(&nodes[7]).await;
-	nodes[4].connect(&nodes[9]).await;
+	//                 N9           N10 -- N11
+	nodes[0].connect(&nodes[1])?;
+	nodes[1].connect(&nodes[2])?;
+	nodes[1].connect(&nodes[5])?;
+	nodes[1].connect(&nodes[6])?;
+	nodes[6].connect(&nodes[7])?;
+	nodes[2].connect(&nodes[3])?;
+	nodes[2].connect(&nodes[9])?;
+	nodes[3].connect(&nodes[4])?;
+	nodes[4].connect(&nodes[8])?;
+	nodes[4].connect(&nodes[10])?;
+	nodes[10].connect(&nodes[11])?;
 
-	tokio::time::sleep(Duration::from_millis(1_000)).await;
+	sleep(Duration::from_millis(1_000));
 
 	// Multisig party node index
 	let starting_node_idx = 6;
@@ -65,7 +72,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 
 	// Multisig party node must be connected to an initial Node
 	while !nodes[starting_node_idx].is_peer_connected(&nodes[initial_node_idx].node_id()) {
-		tokio::time::sleep(Duration::from_millis(250)).await;
+		sleep(Duration::from_millis(250));
 		println!(
 			"Connecting to {} -> {} ...",
 			nodes[starting_node_idx].alias(),
@@ -141,7 +148,7 @@ async fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	assert!(batch_psbts.len() == 1);
 	let psbt_hex = batch_psbts.first().unwrap();
 
-	let mut psbt = Psbt::deserialize(&hex::decode(psbt_hex).unwrap()).unwrap();
+	let mut psbt = Psbt::deserialize(&psbt_hex).unwrap();
 
 	// Multisig signatures
 	nodes[starting_node_idx].multisig_sign_psbt(&sender_pubkey, &mut psbt)?;

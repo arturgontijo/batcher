@@ -17,12 +17,14 @@ pub enum BatchMessage {
 		receiver_node_id: PublicKey,
 		uniform_amount: u64,
 		fee_per_participant: u64,
+		max_utxo_per_participant: u8,
 		max_participants: u8,
 		/// Vec of participants' node_id
 		participants: Vec<PublicKey>,
 		endpoints: Vec<String>,
-		/// PSBT hex string
-		psbt_hex: String,
+		not_participants: Vec<PublicKey>,
+		/// PSBT bytes
+		psbt: Vec<u8>,
 		/// Signing workflow
 		sign: bool,
 	},
@@ -53,10 +55,12 @@ impl Writeable for BatchMessage {
 				receiver_node_id,
 				uniform_amount,
 				fee_per_participant,
+				max_utxo_per_participant,
 				max_participants,
 				participants,
 				endpoints,
-				psbt_hex,
+				not_participants,
+				psbt,
 				sign,
 			} => {
 				w.write_all(&[0x01])?;
@@ -64,6 +68,7 @@ impl Writeable for BatchMessage {
 				receiver_node_id.write(w)?;
 				uniform_amount.write(w)?;
 				fee_per_participant.write(w)?;
+				max_utxo_per_participant.write(w)?;
 				max_participants.write(w)?;
 				// Vectors must tell us their length
 				let mut participants_len = 0;
@@ -71,8 +76,8 @@ impl Writeable for BatchMessage {
 					participants_len += PUBLIC_KEY_SIZE;
 				}
 				(participants_len as u16).write(w)?;
-				for pub_key in participants.iter() {
-					pub_key.write(w)?;
+				for pubkey in participants.iter() {
+					pubkey.write(w)?;
 				}
 
 				let mut endpoints_len = 0;
@@ -83,8 +88,17 @@ impl Writeable for BatchMessage {
 				for ep in endpoints.iter() {
 					ep.write(w)?;
 				}
+
+				let mut not_participants_len = 0;
+				for _ in not_participants.iter() {
+					not_participants_len += PUBLIC_KEY_SIZE;
+				}
+				(not_participants_len as u16).write(w)?;
+				for pubkey in not_participants.iter() {
+					pubkey.write(w)?;
+				}
 				// ---
-				psbt_hex.write(w)?;
+				psbt.write(w)?;
 				sign.write(w)
 			},
 			BatchMessage::AnyOther { sender_node_id, receiver_node_id, data } => {
@@ -106,6 +120,7 @@ impl Readable for BatchMessage {
 		let receiver_node_id = PublicKey::read(r)?;
 		let uniform_amount: u64 = Readable::read(r)?;
 		let fee_per_participant: u64 = Readable::read(r)?;
+		let max_utxo_per_participant: u8 = Readable::read(r)?;
 		let max_participants: u8 = Readable::read(r)?;
 
 		let participants_len: u16 = Readable::read(r)?;
@@ -116,12 +131,12 @@ impl Readable for BatchMessage {
 				break;
 			}
 			match Readable::read(r) {
-				Ok(pub_key) => {
+				Ok(pubkey) => {
 					if participants_len < addr_readpos + (PUBLIC_KEY_SIZE as u16) {
 						return Err(DecodeError::BadLengthDescriptor);
 					}
 					addr_readpos += PUBLIC_KEY_SIZE as u16;
-					participants.push(pub_key);
+					participants.push(pubkey);
 				},
 				Err(DecodeError::ShortRead) => return Err(DecodeError::BadLengthDescriptor),
 				Err(e) => return Err(e),
@@ -138,7 +153,27 @@ impl Readable for BatchMessage {
 			endpoints.push(ep);
 		}
 
-		let psbt_hex = String::read(r)?;
+		let not_participants_len: u16 = Readable::read(r)?;
+		let mut not_participants: Vec<PublicKey> = Vec::new();
+		let mut addr_readpos = 0;
+		loop {
+			if not_participants_len <= addr_readpos {
+				break;
+			}
+			match Readable::read(r) {
+				Ok(pubkey) => {
+					if not_participants_len < addr_readpos + (PUBLIC_KEY_SIZE as u16) {
+						return Err(DecodeError::BadLengthDescriptor);
+					}
+					addr_readpos += PUBLIC_KEY_SIZE as u16;
+					not_participants.push(pubkey);
+				},
+				Err(DecodeError::ShortRead) => return Err(DecodeError::BadLengthDescriptor),
+				Err(e) => return Err(e),
+			}
+		}
+
+		let psbt = Vec::<u8>::read(r)?;
 		let sign = bool::read(r)?;
 
 		match msg_type[0] {
@@ -147,13 +182,19 @@ impl Readable for BatchMessage {
 				receiver_node_id,
 				uniform_amount,
 				fee_per_participant,
+				max_utxo_per_participant,
 				max_participants,
 				participants,
 				endpoints,
-				psbt_hex,
+				not_participants,
+				psbt,
 				sign,
 			}),
-			0x02 => Ok(BatchMessage::AnyOther { sender_node_id, receiver_node_id, data: psbt_hex }),
+			0x02 => Ok(BatchMessage::AnyOther {
+				sender_node_id,
+				receiver_node_id,
+				data: "data".to_string(),
+			}),
 			_ => Err(DecodeError::UnknownVersion),
 		}
 	}

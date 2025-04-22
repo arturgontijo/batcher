@@ -9,7 +9,7 @@ use bdk_wallet::{
 	descriptor::IntoWalletDescriptor,
 	rusqlite::Connection,
 	template::Bip84,
-	Balance, KeychainKind, SignOptions, Wallet,
+	Balance, KeychainKind, LocalOutput, SignOptions, Wallet,
 };
 use bitcoin::{
 	absolute::LockTime,
@@ -35,7 +35,7 @@ pub struct Broker {
 	pub pubkey: PublicKey,
 	pub wif: String,
 	pub wallets: Arc<Mutex<HashMap<PublicKey, PersistedWallet>>>,
-	pub batch_psbts: Arc<Mutex<Vec<String>>>,
+	pub batch_psbts: Arc<Mutex<Vec<Vec<u8>>>>,
 	pub bitcoind_client: Arc<Client>,
 	pub persister: Arc<Mutex<Connection>>,
 }
@@ -172,6 +172,13 @@ impl Broker {
 		}
 	}
 
+	pub fn list_unspent(&self) -> Result<Vec<LocalOutput>, Box<dyn Error>> {
+		let mut wallets = self.wallets.lock().unwrap();
+		let wallet = wallets.get_mut(&self.pubkey).unwrap();
+		let utxos = wallet.list_unspent().collect();
+		Ok(utxos)
+	}
+
 	pub fn build_psbt(
 		&self, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate, locktime: LockTime,
 	) -> Result<Psbt, Box<dyn Error>> {
@@ -207,7 +214,7 @@ impl Broker {
 	}
 
 	pub fn add_utxos_to_psbt(
-		&self, psbt: &mut Psbt, max_count: u16, uniform_amount: Option<Amount>, fee: Amount,
+		&self, psbt: &mut Psbt, max_count: u8, uniform_amount: Option<Amount>, fee: Amount,
 		payer: bool,
 	) -> Result<(), Box<dyn Error>> {
 		let mut wallets = self.wallets.lock().unwrap();
@@ -216,7 +223,7 @@ impl Broker {
 	}
 
 	pub fn multisig_add_utxos_to_psbt(
-		&self, other: &PublicKey, psbt: &mut Psbt, max_count: u16, uniform_amount: Option<Amount>,
+		&self, other: &PublicKey, psbt: &mut Psbt, max_count: u8, uniform_amount: Option<Amount>,
 		fee: Amount, payer: bool,
 	) -> Result<(), Box<dyn Error>> {
 		let mut wallets = self.wallets.lock().unwrap();
@@ -236,7 +243,7 @@ impl Broker {
 
 	fn _add_utxos_to_psbt(
 		&self, wallet: &mut PersistedWallet, other_opt: Option<&PublicKey>, psbt: &mut Psbt,
-		max_count: u16, uniform_amount: Option<Amount>, fee: Amount, payer: bool,
+		max_count: u8, uniform_amount: Option<Amount>, fee: Amount, payer: bool,
 	) -> Result<(), Box<dyn Error>> {
 		let mut count = 0;
 		let mut receiver_utxos_value = Amount::from_sat(0);
@@ -246,7 +253,7 @@ impl Broker {
 				bitcoin::blockdata::script::Builder::new()
 					.push_opcode(opcodes::all::OP_PUSHNUM_2)
 					.push_key(&self.pubkey.into())
-					.push_key(&other.clone().into())
+					.push_key(&(*other).into())
 					.push_opcode(opcodes::all::OP_PUSHNUM_2)
 					.push_opcode(opcodes::all::OP_CHECKMULTISIG)
 					.into_script(),
@@ -255,7 +262,7 @@ impl Broker {
 			None
 		};
 
-		let utxos: Vec<_> = wallet.list_unspent().collect();
+		let utxos: Vec<LocalOutput> = wallet.list_unspent().collect();
 		for utxo in utxos {
 			let mut inserted = false;
 			for input in psbt.unsigned_tx.input.clone() {
@@ -359,13 +366,13 @@ impl Broker {
 		Ok(())
 	}
 
-	pub fn push_to_batch_psbts(&self, psbt_hex: String) -> Result<(), Box<dyn Error>> {
+	pub fn push_to_batch_psbts(&self, psbt: Vec<u8>) -> Result<(), Box<dyn Error>> {
 		let mut unlocked = self.batch_psbts.lock().unwrap();
-		unlocked.push(psbt_hex.clone());
+		unlocked.push(psbt);
 		Ok(())
 	}
 
-	pub fn get_batch_psbts(&self) -> Result<Vec<String>, Box<dyn Error>> {
+	pub fn get_batch_psbts(&self) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
 		match self.batch_psbts.try_lock() {
 			Ok(mut psbts) => Ok(std::mem::take(&mut *psbts)),
 			Err(_) => Ok(vec![]),

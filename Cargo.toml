@@ -17,4 +17,3 @@ bitcoincore-rpc = { version = "0.19.0" }
 bdk_wallet = { version = "1.2.0", features = ["rusqlite"] }
 
 bitcoin = { version = "0.32.2", default-features = false, features = ["secp-recovery"] }
-hex = "0.4.3"
