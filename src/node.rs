@@ -385,7 +385,7 @@ impl Node {
 	pub fn init_psbt_batch(
 		&self, their_node_id: PublicKey, output_script: ScriptBuf, amount: Amount,
 		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
-		max_participants: u8, max_utxo_per_participant: u8,
+		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
 	) -> Result<(), Box<dyn Error>> {
 		self.peer_manager
 			.peer_by_node_id(&their_node_id)
@@ -408,9 +408,11 @@ impl Node {
 			fee_per_participant,
 			max_utxo_per_participant,
 			max_participants: max_participants + 1,
+			max_hops,
 			participants: vec![self.node_id()],
 			endpoints: vec![self.endpoint()],
 			not_participants: vec![],
+			hops: 0,
 			psbt: psbt.serialize(),
 			sign: false,
 		};
@@ -423,7 +425,7 @@ impl Node {
 	pub fn init_multisig_psbt_batch(
 		&self, other: &PublicKey, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate,
 		locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
-		max_participants: u8, max_utxo_per_participant: u8,
+		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
 	) -> Result<(), Box<dyn Error>> {
 		let mut psbt =
 			self.broker.multisig_build_psbt(other, output_script, amount, fee_rate, locktime)?;
@@ -460,15 +462,17 @@ impl Node {
 				fee_per_participant,
 				max_utxo_per_participant,
 				max_participants,
+				max_hops,
 				participants: vec![self.node_id()],
 				endpoints: vec![self.endpoint()],
 				not_participants: vec![],
+				hops: 0,
 				psbt: psbt.serialize(),
 				sign: false,
 			};
 			self.broker.send(pd.counterparty_node_id, batch_psbt)?;
 		} else {
-			return Err("Node has no peers connected!".into());
+			return Err("Node has no connected peers!".into());
 		}
 
 		Ok(())
@@ -477,7 +481,7 @@ impl Node {
 	fn _psbt_batch(
 		&self, their_node_id: PublicKey, output_script: ScriptBuf, amount: Amount,
 		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
-		max_participants: u8, max_utxo_per_participant: u8,
+		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
 	) -> Result<(), Box<dyn Error>> {
 		self.peer_manager
 			.peer_by_node_id(&their_node_id)
@@ -500,9 +504,11 @@ impl Node {
 			fee_per_participant,
 			max_utxo_per_participant,
 			max_participants: max_participants + 1,
+			max_hops,
 			participants: vec![self.node_id()],
 			endpoints: vec![self.endpoint()],
 			not_participants: vec![],
+			hops: 0,
 			psbt: psbt.serialize(),
 			sign: false,
 		};

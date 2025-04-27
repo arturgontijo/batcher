@@ -21,6 +21,7 @@ use wallet::{create_sender_multisig, create_wallet, wallet_total_balance};
 
 use std::error::Error;
 use std::thread::sleep;
+use std::u8;
 use tokio::time::Duration;
 
 #[test]
@@ -100,6 +101,7 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	let max_utxo_count = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
 	let max_participants = 10;
+	let max_hops = u8::MAX;
 
 	let secp = Secp256k1::new();
 	let secret_key = SecretKey::from_slice(&[77u8; 32])?;
@@ -143,6 +145,7 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 		fee_per_participant,
 		max_participants,
 		max_utxo_count,
+		max_hops,
 	)?;
 
 	broadcast_tx(

@@ -95,6 +95,7 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 	let max_utxo_count = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
 	let max_participants = 3;
+	let max_hops = 4;
 
 	node.init_psbt_batch(
 		np_node.node_id(),
@@ -106,6 +107,7 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 		fee_per_participant,
 		max_participants,
 		max_utxo_count,
+		max_hops,
 	)?;
 
 	broadcast_tx(&bitcoind, &node, &others, &mut receiver, None)?;

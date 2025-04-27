@@ -27,15 +27,17 @@ pub(crate) fn process_batch_messages(
 		fee_per_participant,
 		max_utxo_per_participant,
 		max_participants,
+		max_hops,
 		participants,
 		endpoints,
 		not_participants,
+		hops,
 		psbt,
 		sign,
 	} = msg
 	{
 		println!(
-			"[{}][{}] BatchPsbt: sender={} | uni_amt={} | fee={} | utxos={} | max_p={} | pts={} | ep={} | n_pts={} | len={} | sign={}",
+			"[{}][{}] BatchPsbt: snd={} | uamt={} | fee={} | utxos={} | max_p={} | pts={} | ep={} | n_pts={} | hops={}/{} | len={} | sign={}",
 			node_id,
 			node_alias,
 			print_pubkey(&sender_node_id),
@@ -46,9 +48,39 @@ pub(crate) fn process_batch_messages(
 			participants.len(),
 			endpoints.len(),
 			not_participants.len(),
+			hops,
+			max_hops,
 			psbt.len(),
 			sign,
 		);
+
+		// Check hops counter to see if we can process the BatchPsbt or just route it back to last participant
+		// This can be triggered if msg finds itself into an infinite loop of nodes or if there is no more node to be a participant
+		let mut hops = hops;
+		if !sign && (hops >= max_hops || hops == u8::MAX) {
+			let last_participant_id = *participants.last().unwrap();
+			let last_participant_endpoint = endpoints.last().unwrap().clone();
+			connect_peer(peer_manager.clone(), last_participant_id, last_participant_endpoint)?;
+			let msg = BatchMessage::BatchPsbt {
+				sender_node_id: *node_id,
+				receiver_node_id: last_participant_id,
+				uniform_amount,
+				fee_per_participant,
+				max_utxo_per_participant,
+				// We must change this in order to force the signing phase
+				max_participants: participants.len() as u8,
+				max_hops,
+				participants,
+				endpoints,
+				not_participants,
+				hops,
+				psbt,
+				sign: true,
+			};
+			println!("\n[{}][{}] BatchPsbt: Too many hops [{}/{}], routing it back to last participant...", node_id, node_alias, hops, max_hops);
+			return broker.send(last_participant_id, msg);
+		}
+		hops = hops.saturating_add(1);
 
 		let mut psbt = Psbt::deserialize(&psbt).unwrap();
 
@@ -162,9 +194,11 @@ pub(crate) fn process_batch_messages(
 				fee_per_participant,
 				max_utxo_per_participant,
 				max_participants,
+				max_hops,
 				participants,
 				endpoints,
 				not_participants,
+				hops,
 				psbt,
 				sign: false,
 			};
@@ -185,31 +219,7 @@ pub(crate) fn process_batch_messages(
 			if !participants.is_empty() {
 				let next_signer_node_id = *participants.last().unwrap();
 				let next_signer_endpoint = endpoints.last().unwrap().clone();
-				// Wait for handshake to finish
-				while peer_manager.peer_by_node_id(&next_signer_node_id).is_none() {
-					let next_signer_endpoint = next_signer_endpoint.clone();
-					sleep(Duration::from_millis(500));
-					if peer_manager.peer_by_node_id(&next_signer_node_id).is_none() {
-						let pm_clone = peer_manager.clone();
-						tokio::spawn(async move {
-							let stream = TcpStream::connect(&next_signer_endpoint)
-								.await
-								.expect("Failed to connect");
-							match stream.into_std() {
-								Ok(std_stream) => {
-									setup_outbound(
-										pm_clone.clone(),
-										next_signer_node_id,
-										std_stream,
-									)
-									.await
-								},
-								Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
-							}
-						});
-						sleep(Duration::from_millis(500));
-					}
-				}
+				connect_peer(peer_manager.clone(), next_signer_node_id, next_signer_endpoint)?;
 				if peer_manager.peer_by_node_id(&next_signer_node_id).is_some() {
 					let msg = BatchMessage::BatchPsbt {
 						sender_node_id: *node_id,
@@ -218,9 +228,11 @@ pub(crate) fn process_batch_messages(
 						fee_per_participant,
 						max_utxo_per_participant,
 						max_participants,
+						max_hops,
 						participants,
 						endpoints,
 						not_participants,
+						hops,
 						psbt,
 						sign: true,
 					};
@@ -240,6 +252,40 @@ pub(crate) fn process_batch_messages(
 				);
 				broker.push_to_batch_psbts(psbt).unwrap();
 			}
+		}
+	}
+	Ok(())
+}
+
+fn connect_peer(
+	peer_manager: Arc<PeerManager>, other_node_id: PublicKey, other_endpoint: String,
+) -> Result<(), Box<dyn Error>> {
+	let mut counter = 0;
+	// Wait for handshake to finish
+	while peer_manager.peer_by_node_id(&other_node_id).is_none() {
+		let next_node_endpoint = other_endpoint.clone();
+		sleep(Duration::from_millis(300));
+		if peer_manager.peer_by_node_id(&other_node_id).is_none() {
+			let pm_clone = peer_manager.clone();
+			tokio::spawn(async move {
+				let stream =
+					TcpStream::connect(&next_node_endpoint).await.expect("Failed to connect");
+				match stream.into_std() {
+					Ok(std_stream) => {
+						setup_outbound(pm_clone.clone(), other_node_id, std_stream).await
+					},
+					Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
+				}
+			});
+			sleep(Duration::from_millis(300));
+		}
+		counter += 1;
+		if counter > 1_000 {
+			return Err(format!(
+				"Can not connect to peer: {} at {}",
+				other_node_id, other_endpoint
+			)
+			.into());
 		}
 	}
 	Ok(())

@@ -3,25 +3,25 @@ mod common;
 use batcher::bitcoind;
 use batcher::bitcoind::BitcoindConfig;
 use batcher::config::BrokerConfig;
+use batcher::node::Node;
 use batcher::wallet;
 
 use bdk_wallet::KeychainKind;
 use bitcoin::{absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeRate, Network};
 
+use bitcoincore_rpc::Client;
 use bitcoind::{bitcoind_client, fund_address, wait_for_block};
 use common::{broadcast_tx, setup_nodes};
 use wallet::create_wallet;
 
 use std::error::Error;
+use std::sync::Arc;
 use std::thread::sleep;
 use tokio::time::Duration;
 
-#[test]
-fn batcher_as_node() -> Result<(), Box<dyn Error>> {
-	let network = Network::Signet;
-
-	let bitcoind_config = BitcoindConfig::new("http://0.0.0.0:38332", "local", "local");
-
+fn setup_network(
+	network: Network, bitcoind_config: BitcoindConfig,
+) -> Result<(Client, Vec<Arc<Node>>), Box<dyn Error>> {
 	let broker_config = BrokerConfig::new(vec![], 25_000, 2);
 	let nodes = setup_nodes(8, 7777, network, bitcoind_config.clone(), broker_config)?;
 
@@ -57,6 +57,17 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 
 	sleep(Duration::from_millis(1_000));
 
+	Ok((bitcoind, nodes))
+}
+
+#[test]
+fn batcher_as_node() -> Result<(), Box<dyn Error>> {
+	let network = Network::Signet;
+
+	let bitcoind_config = BitcoindConfig::new("http://0.0.0.0:38332", "local", "local");
+
+	let (bitcoind, nodes) = setup_network(network, bitcoind_config)?;
+
 	// Sender's node index
 	let starting_node_idx = 7;
 	// Sender must start the Batch workflow by selecting an initial Node
@@ -75,6 +86,7 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	let max_utxo_count = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
 	let max_participants = 7;
+	let max_hops = 128;
 
 	// Sender must connect to an initial Node
 	nodes[starting_node_idx].connect(&nodes[initial_node_idx])?;
@@ -97,6 +109,28 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 		fee_per_participant,
 		max_participants,
 		max_utxo_count,
+		max_hops,
+	)?;
+
+	broadcast_tx(&bitcoind, &nodes[starting_node_idx], &nodes, &mut receiver, None)?;
+
+	let max_hops = 3;
+
+	let script_pubkey =
+		receiver.reveal_next_address(KeychainKind::External).address.script_pubkey();
+
+	println!("\nInitializing BatchPSBT with max_hops={}\n", max_hops);
+	nodes[starting_node_idx].init_psbt_batch(
+		nodes[initial_node_idx].node_id(),
+		script_pubkey,
+		amount,
+		fee_rate,
+		locktime,
+		uniform_amount,
+		fee_per_participant,
+		max_participants,
+		max_utxo_count,
+		max_hops,
 	)?;
 
 	broadcast_tx(&bitcoind, &nodes[starting_node_idx], &nodes, &mut receiver, None)?;

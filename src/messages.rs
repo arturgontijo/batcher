@@ -19,10 +19,12 @@ pub enum BatchMessage {
 		fee_per_participant: u64,
 		max_utxo_per_participant: u8,
 		max_participants: u8,
+		max_hops: u8,
 		/// Vec of participants' node_id
 		participants: Vec<PublicKey>,
 		endpoints: Vec<String>,
 		not_participants: Vec<PublicKey>,
+		hops: u8,
 		/// PSBT bytes
 		psbt: Vec<u8>,
 		/// Signing workflow
@@ -57,9 +59,11 @@ impl Writeable for BatchMessage {
 				fee_per_participant,
 				max_utxo_per_participant,
 				max_participants,
+				max_hops,
 				participants,
 				endpoints,
 				not_participants,
+				hops,
 				psbt,
 				sign,
 			} => {
@@ -70,6 +74,7 @@ impl Writeable for BatchMessage {
 				fee_per_participant.write(w)?;
 				max_utxo_per_participant.write(w)?;
 				max_participants.write(w)?;
+				max_hops.write(w)?;
 				// Vectors must tell us their length
 				let mut participants_len = 0;
 				for _ in participants.iter() {
@@ -98,6 +103,7 @@ impl Writeable for BatchMessage {
 					pubkey.write(w)?;
 				}
 				// ---
+				hops.write(w)?;
 				psbt.write(w)?;
 				sign.write(w)
 			},
@@ -122,6 +128,7 @@ impl Readable for BatchMessage {
 		let fee_per_participant: u64 = Readable::read(r)?;
 		let max_utxo_per_participant: u8 = Readable::read(r)?;
 		let max_participants: u8 = Readable::read(r)?;
+		let max_hops: u8 = Readable::read(r)?;
 
 		let participants_len: u16 = Readable::read(r)?;
 		let mut participants: Vec<PublicKey> = Vec::new();
@@ -173,6 +180,7 @@ impl Readable for BatchMessage {
 			}
 		}
 
+		let hops = u8::read(r)?;
 		let psbt = Vec::<u8>::read(r)?;
 		let sign = bool::read(r)?;
 
@@ -184,9 +192,11 @@ impl Readable for BatchMessage {
 				fee_per_participant,
 				max_utxo_per_participant,
 				max_participants,
+				max_hops,
 				participants,
 				endpoints,
 				not_participants,
+				hops,
 				psbt,
 				sign,
 			}),
