@@ -57,15 +57,17 @@ pub(crate) fn process_batch_messages(
 		let mut not_participants = not_participants.clone();
 
 		// Can we participate?
+		// Check fee value and
+		// We must have at least one UTXO and it must cover the uniform_amount value
 		let mut can_participate = false;
-		let mut utxos_count = 0;
-		let mut utxos_value = Amount::ZERO;
-		for utxo in broker.list_unspent()? {
-			utxos_value += utxo.txout.value;
-			utxos_count += 1;
-			if utxos_count > 1 && utxos_value.to_sat() > uniform_amount {
-				can_participate = true;
-				break;
+		if fee_per_participant >= broker.config.minimum_fee {
+			let mut utxos_value = Amount::ZERO;
+			for utxo in broker.list_unspent()? {
+				utxos_value += utxo.txout.value;
+				if utxos_value.to_sat() > uniform_amount {
+					can_participate = true;
+					break;
+				}
 			}
 		}
 		// ------
@@ -80,13 +82,10 @@ pub(crate) fn process_batch_messages(
 
 				let uniform_amount_opt =
 					if uniform_amount > 0 { Some(Amount::from_sat(uniform_amount)) } else { None };
-				broker.add_utxos_to_psbt(
-					&mut psbt,
-					max_utxo_per_participant,
-					uniform_amount_opt,
-					fee,
-					false,
-				)?;
+
+				let max_count = broker.config.max_utxo_count.min(max_utxo_per_participant);
+
+				broker.add_utxos_to_psbt(&mut psbt, max_count, uniform_amount_opt, fee, false)?;
 			}
 		} else if !participants.contains(node_id) && !not_participants.contains(node_id) {
 			not_participants.push(*node_id);

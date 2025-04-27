@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod bitcoind;
 pub mod broker;
+pub mod config;
 pub mod events;
 pub mod logger;
 pub mod messages;

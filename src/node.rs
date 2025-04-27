@@ -1,5 +1,7 @@
 use crate::batch::process_batch_messages;
+use crate::bitcoind::BitcoindConfig;
 use crate::broker::Broker;
+use crate::config::{BrokerConfig, NodeConfig};
 use crate::events::SimpleEventHandler;
 use crate::logger::SimpleLogger;
 use crate::messages::{BatchMessage, BatchMessageHandler};
@@ -7,9 +9,10 @@ use crate::persister::InMemoryPersister;
 use crate::types::{ChainMonitor, ChannelManager, FixedFeeEstimator, MockBroadcaster, PeerManager};
 
 use bdk_wallet::Balance;
+use bip39::{Language, Mnemonic};
 use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
-use bitcoin::{Address, Amount, FeeRate, Psbt, ScriptBuf, Transaction};
+use bitcoin::{hex::FromHex, Address, Amount, FeeRate, Psbt, ScriptBuf, Transaction};
 use lightning::bitcoin::network::Network;
 use lightning::events::EventsProvider;
 use lightning::ln::channelmanager::ChainParameters;
@@ -24,6 +27,7 @@ use lightning::sign::KeysManager;
 use lightning::util::config::UserConfig;
 use lightning_net_tokio::{setup_inbound, setup_outbound};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::runtime::Runtime;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -32,32 +36,72 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{self, Duration};
 
 pub struct Node {
-	node_id: PublicKey,
-	node_alias: String,
+	id: PublicKey,
+	alias: String,
 	endpoint: String,
 	pub peer_manager: Arc<PeerManager>,
 	pub channel_manager: Arc<ChannelManager>,
 	pub event_handler: Arc<SimpleEventHandler>,
 	pub custom_message_handler: Arc<BatchMessageHandler>,
 	pub broker: Broker,
-	runtime: Arc<RwLock<Option<Arc<tokio::runtime::Runtime>>>>,
+	runtime: Arc<RwLock<Option<Arc<Runtime>>>>,
 }
 
 impl Node {
 	pub fn new(
-		node_alias: String, seed_bytes: &[u8; 32], port: u16, network: Network, db_path: String,
+		alias: String, secret: &[u8; 32], host: String, port: u16, network: Network,
+		bitcoind_config: BitcoindConfig, wallet_secret: &[u8; 32], db_path: String,
+		broker_config: BrokerConfig,
+	) -> Result<Self, Box<dyn Error>> {
+		Self::inner_new(
+			alias,
+			secret,
+			host,
+			port,
+			network,
+			bitcoind_config,
+			wallet_secret,
+			db_path,
+			broker_config,
+		)
+	}
+
+	pub fn new_from_config(config: NodeConfig) -> Result<Self, Box<dyn Error>> {
+		let mnemonic = Mnemonic::parse_in(Language::English, config.mnemonic)?;
+		let seed = mnemonic.to_seed("");
+		let wallet_secret: &[u8; 32] = seed[..32].try_into().unwrap();
+
+		let secret = <[u8; 32]>::from_hex(&config.secret)?;
+
+		Self::inner_new(
+			config.alias,
+			&secret,
+			config.host,
+			config.port,
+			config.network,
+			config.bitcoind_config,
+			wallet_secret,
+			config.db_path,
+			config.broker_config,
+		)
+	}
+
+	fn inner_new(
+		alias: String, secret: &[u8; 32], host: String, port: u16, network: Network,
+		bitcoind_config: BitcoindConfig, wallet_secret: &[u8; 32], db_path: String,
+		broker_config: BrokerConfig,
 	) -> Result<Self, Box<dyn Error>> {
 		let secp = Secp256k1::new();
 
 		// Step 1: Initialize KeysManager
 		let starting_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 		let keys_manager = Arc::new(KeysManager::new(
-			seed_bytes,
+			secret,
 			starting_time.as_secs(),
 			starting_time.subsec_nanos(),
 		));
 
-		let node_id = keys_manager.get_node_secret_key().public_key(&secp);
+		let id = keys_manager.get_node_secret_key().public_key(&secp);
 
 		// Step 2: Set up peripheral components
 		let fee_estimator = Arc::new(FixedFeeEstimator { sat_per_kw: 1000 });
@@ -118,10 +162,12 @@ impl Node {
 		let custom_message_handler = Arc::new(BatchMessageHandler::new());
 
 		let broker = Broker::new(
-			node_id,
-			node_alias.clone(),
-			seed_bytes,
+			id,
+			alias.clone(),
+			wallet_secret,
 			network,
+			broker_config,
+			bitcoind_config,
 			db_path,
 			custom_message_handler.clone(),
 		)?;
@@ -136,15 +182,15 @@ impl Node {
 		let peer_manager = Arc::new(PeerManager::new(
 			message_handler,
 			starting_time.as_secs() as u32,
-			seed_bytes,
+			secret,
 			logger.clone(),
 			keys_manager.clone(),
 		));
 
 		Ok(Node {
-			node_id,
-			node_alias,
-			endpoint: format!("0.0.0.0:{}", port),
+			id,
+			alias,
+			endpoint: format!("{}:{}", host, port),
 			peer_manager,
 			channel_manager,
 			event_handler: Arc::new(SimpleEventHandler),
@@ -155,11 +201,11 @@ impl Node {
 	}
 
 	pub fn node_id(&self) -> PublicKey {
-		self.node_id
+		self.id
 	}
 
 	pub fn alias(&self) -> String {
-		self.node_alias.clone()
+		self.alias.clone()
 	}
 
 	pub fn endpoint(&self) -> String {
@@ -218,8 +264,8 @@ impl Node {
 
 		let broker_clone = broker.clone();
 		let pm_clone = peer_manager.clone();
-		let node_alias = self.node_alias.clone();
-		let node_id = self.node_id;
+		let node_alias = self.alias.clone();
+		let node_id = self.id;
 		let node_endpoint = self.endpoint.clone();
 		runtime.spawn(async move {
 			let mut interval = time::interval(Duration::from_millis(50));
@@ -243,13 +289,14 @@ impl Node {
 		});
 
 		// === 3. Accept incoming connections ===
-		let node_id = self.node_id;
-		let node_alias = self.node_alias.clone();
+		let node_id = self.id;
+		let node_alias = self.alias.clone();
 		let endpoint = self.endpoint.clone();
 		runtime.spawn(async move {
 			let listener = TcpListener::bind(&endpoint).await.expect("Failed to bind port");
 			println!("[{}][{}] Node listening on {}", node_id, node_alias, endpoint);
 			loop {
+				let node_alias = node_alias.clone();
 				let peer_manager = peer_manager.clone();
 				match listener.accept().await {
 					Ok((stream, addr)) => {
@@ -262,19 +309,26 @@ impl Node {
 								},
 								Err(e) => {
 									eprintln!(
-										"[{}] Failed to convert tokio stream to std: {}",
-										node_id, e
+										"[{}][{}] Failed to convert tokio stream to std: {}",
+										node_id, node_alias, e
 									);
 								},
 							}
 						});
 					},
 					Err(e) => {
-						eprintln!("[{}] Connection failed: {}", node_id, e);
+						eprintln!("[{}][{}] Connection failed: {}", node_id, node_alias, e);
 					},
 				}
 			}
 		});
+
+		for (pubkey, ep) in self.broker.config.bootnodes.clone() {
+			if !self.is_peer_connected(&pubkey) {
+				println!("[{}][{}] Bootnode connecting -> {}@{}", self.id, self.alias, pubkey, ep);
+				self._connect(&runtime, (pubkey, ep))?;
+			}
+		}
 
 		*runtime_lock = Some(runtime);
 
@@ -301,21 +355,25 @@ impl Node {
 	pub fn connect(&self, other: &Node) -> Result<(), Box<dyn Error>> {
 		let runtime_lock = self.runtime.read().unwrap();
 		if let Some(runtime) = runtime_lock.as_ref() {
-			let other_id = other.node_id;
-			let other_endpoint = other.endpoint.clone();
-			let peer_manager = self.peer_manager.clone();
-			runtime.spawn(async move {
-				let stream = TcpStream::connect(&other_endpoint).await.expect("Failed to connect");
-				match stream.into_std() {
-					Ok(std_stream) => {
-						setup_outbound(peer_manager.clone(), other_id, std_stream).await
-					},
-					Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
-				}
-			});
-			return Ok(());
+			return self._connect(runtime, (other.node_id(), other.endpoint()));
 		}
 		Err("Connect has failed!".into())
+	}
+
+	fn _connect(
+		&self, runtime: &Arc<Runtime>, other: (PublicKey, String),
+	) -> Result<(), Box<dyn Error>> {
+		let other_id = other.0;
+		let other_endpoint = other.1;
+		let peer_manager = self.peer_manager.clone();
+		runtime.spawn(async move {
+			let stream = TcpStream::connect(&other_endpoint).await.expect("Failed to connect");
+			match stream.into_std() {
+				Ok(std_stream) => setup_outbound(peer_manager.clone(), other_id, std_stream).await,
+				Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
+			}
+		});
+		Ok(())
 	}
 
 	pub fn build_psbt(
@@ -331,7 +389,7 @@ impl Node {
 	) -> Result<(), Box<dyn Error>> {
 		self.peer_manager
 			.peer_by_node_id(&their_node_id)
-			.ok_or(format!("[{}] Peer not connected: {}", self.node_id, their_node_id))?;
+			.ok_or(format!("[{}] Peer not connected: {}", self.id, their_node_id))?;
 
 		let mut psbt = self.build_psbt(output_script, amount, fee_rate, locktime)?;
 
@@ -423,7 +481,7 @@ impl Node {
 	) -> Result<(), Box<dyn Error>> {
 		self.peer_manager
 			.peer_by_node_id(&their_node_id)
-			.ok_or(format!("[{}] Peer not connected: {}", self.node_id, their_node_id))?;
+			.ok_or(format!("[{}] Peer not connected: {}", self.id, their_node_id))?;
 
 		let mut psbt = self.build_psbt(output_script, amount, fee_rate, locktime)?;
 

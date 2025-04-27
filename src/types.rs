@@ -27,7 +27,7 @@ impl Filter for MockFilter {
 
 // Mock Fee Estimator with a fixed fee rate
 pub struct FixedFeeEstimator {
-	pub(crate) sat_per_kw: u32,
+	pub sat_per_kw: u32,
 }
 impl FeeEstimator for FixedFeeEstimator {
 	fn get_est_sat_per_1000_weight(
@@ -47,7 +47,7 @@ impl BroadcasterInterface for MockBroadcaster {
 	}
 }
 
-pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
+pub type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<MockFilter>,
 	Arc<MockBroadcaster>,
@@ -56,7 +56,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<InMemoryPersister>,
 >;
 
-pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
+pub type PeerManager = lightning::ln::peer_handler::PeerManager<
 	SocketDescriptor,
 	Arc<ChannelManager>,
 	Arc<IgnoringMessageHandler>,
@@ -66,7 +66,7 @@ pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	Arc<KeysManager>,
 >;
 
-pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
+pub type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<ChainMonitor>,
 	Arc<MockBroadcaster>,
 	Arc<KeysManager>,
@@ -78,15 +78,15 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 	Arc<SimpleLogger>,
 >;
 
-pub(crate) type PersistedWallet = bdk_wallet::PersistedWallet<Connection>;
+pub type PersistedWallet = bdk_wallet::PersistedWallet<Connection>;
 
-// pub(crate) type Wallet =
+// pub type Wallet =
 // 	crate::wallet::Wallet<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<SimpleLogger>>;
 
-// pub(crate) type KeysManager =
+// pub type KeysManager =
 // 	crate::wallet::WalletKeysManager<Arc<Broadcaster>, Arc<OnchainFeeEstimator>, Arc<SimpleLogger>>;
 
-pub(crate) type Router = DefaultRouter<
+pub type Router = DefaultRouter<
 	Arc<Graph>,
 	Arc<SimpleLogger>,
 	Arc<KeysManager>,
@@ -94,17 +94,17 @@ pub(crate) type Router = DefaultRouter<
 	ProbabilisticScoringFeeParameters,
 	Scorer,
 >;
-pub(crate) type Scorer = ProbabilisticScorer<Arc<Graph>, Arc<SimpleLogger>>;
+pub type Scorer = ProbabilisticScorer<Arc<Graph>, Arc<SimpleLogger>>;
 
-pub(crate) type Graph = gossip::NetworkGraph<Arc<SimpleLogger>>;
+pub type Graph = gossip::NetworkGraph<Arc<SimpleLogger>>;
 
-pub(crate) type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
+pub type MessageRouter = lightning::onion_message::messenger::DefaultMessageRouter<
 	Arc<Graph>,
 	Arc<SimpleLogger>,
 	Arc<KeysManager>,
 >;
 
-// pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
+// pub type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
 //     Arc<KeysManager>,
 //     Arc<KeysManager>,
 //     Arc<SimpleLogger>,

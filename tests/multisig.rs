@@ -1,20 +1,22 @@
 mod common;
 
 use batcher::bitcoind;
+use batcher::bitcoind::BitcoindConfig;
+use batcher::config::BrokerConfig;
 use batcher::wallet;
 
-use bdk_wallet::{KeychainKind, SignOptions};
+use bdk_wallet::KeychainKind;
 use bitcoin::PrivateKey;
 use bitcoin::{
 	absolute::LockTime,
 	key::Secp256k1,
 	policy::DEFAULT_MIN_RELAY_TX_FEE,
 	secp256k1::{PublicKey, SecretKey},
-	Amount, FeeRate, Network, NetworkKind, Psbt,
+	Amount, FeeRate, Network, NetworkKind,
 };
-use bitcoincore_rpc::RpcApi;
+
 use bitcoind::{bitcoind_client, fund_address, wait_for_block};
-use common::setup_nodes;
+use common::{broadcast_tx, setup_nodes};
 use wallet::{create_sender_multisig, create_wallet, wallet_total_balance};
 
 use std::error::Error;
@@ -25,9 +27,14 @@ use tokio::time::Duration;
 fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	let network = Network::Signet;
 
-	let nodes = setup_nodes(12, 7777, network)?;
+	let bitcoind_config = BitcoindConfig::new("http://0.0.0.0:38332", "local", "local");
 
-	let bitcoind = bitcoind_client("miner")?;
+	let broker_config = BrokerConfig::new(vec![], 25_000, 4);
+	let nodes = setup_nodes(12, 7777, network, bitcoind_config.clone(), broker_config)?;
+
+	let BitcoindConfig { rpc_address, rpc_user, rpc_pass } = bitcoind_config;
+	let bitcoind = bitcoind_client(rpc_address, rpc_user, rpc_pass, Some("miner"))?;
+
 	for (idx, node) in nodes.iter().enumerate() {
 		// N2 and N10 must have no UTXOs
 		if idx == 2 || idx == 10 {
@@ -81,7 +88,8 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	}
 
 	// Starting Batch workflow
-	let mut receiver = create_wallet(&[255u8; 64], network, "data/receiver.db".to_string())?;
+	let mut receiver =
+		create_wallet(&[255u8; 64], network, "/tmp/batcher/receiver.db".to_string())?;
 
 	let amount = Amount::from_sat(777_777);
 	let script_pubkey =
@@ -101,13 +109,13 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 		network,
 		sender_pk.to_wif(),
 		&nodes[starting_node_idx].pubkey(),
-		"data/multisig_by_sender.db".to_string(),
+		"/tmp/batcher/multisig_by_sender.db".to_string(),
 	)?;
 
 	nodes[starting_node_idx].create_multisig(
 		network,
 		&sender_pubkey,
-		"data/multisig_by_node.db".to_string(),
+		"/tmp/batcher/multisig_by_node.db".to_string(),
 	)?;
 
 	let multisig_funding_addr = nodes[starting_node_idx].multisig_new_address(&sender_pubkey)?;
@@ -137,87 +145,18 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 		max_utxo_count,
 	)?;
 
-	let mut batch_psbts = nodes[starting_node_idx].broker.get_batch_psbts()?;
-	while batch_psbts.is_empty() {
-		wait_for_block(&bitcoind, 2)?;
-		batch_psbts = nodes[starting_node_idx].broker.get_batch_psbts()?;
-	}
-
-	// Sender has the final PSBT (signed by all participants) now
-	println!("\nSender Node has the fully signed PSBT.\n");
-	assert!(batch_psbts.len() == 1);
-	let psbt_hex = batch_psbts.first().unwrap();
-
-	let mut psbt = Psbt::deserialize(&psbt_hex).unwrap();
-
-	// Multisig signatures
-	nodes[starting_node_idx].multisig_sign_psbt(&sender_pubkey, &mut psbt)?;
-	sender_multisig.sign(&mut psbt, SignOptions::default())?;
-
-	println!("Extracting Tx...\n");
-	let tx = psbt.clone().extract_tx()?;
-
-	for node in &nodes {
-		node.sync_wallet(false)?;
-	}
-
-	let receiver_initial_balance = wallet_total_balance(&bitcoind, &mut receiver)?;
-
-	let mut nodes_balance = vec![];
-	for node in &nodes {
-		nodes_balance.push(node.balance().confirmed);
-	}
-
-	println!("\nTx Inputs/Outputs:\n");
-	for input in tx.input.iter() {
-		let tx_info = bitcoind.get_raw_transaction_info(&input.previous_output.txid, None)?;
-		let value = tx_info.vout[input.previous_output.vout as usize].value;
-		println!("====> In  ({})", value);
-	}
-
-	for output in tx.output.iter() {
-		println!("====> Out ({})", output.value);
-	}
-
-	println!("\nSending Tx (id={})...\n", tx.compute_txid());
-
-	nodes[starting_node_idx].broadcast_transactions(&[&tx])?;
-	let tx_id = bitcoind.send_raw_transaction(&tx)?;
-	println!("Tx Sent (id={})\n", tx_id);
-
-	wait_for_block(&bitcoind, 3)?;
-
-	for node in &nodes {
-		node.sync_wallet(false)?;
-	}
-
-	let balance = wallet_total_balance(&bitcoind, &mut receiver)?;
-	println!(
-		"\n[{}][{}] Receiver Balances (b/a/delta): {} | {} | {}\n",
-		nodes[starting_node_idx].node_id(),
-		nodes[starting_node_idx].alias(),
-		receiver_initial_balance,
-		balance,
-		balance - receiver_initial_balance,
-	);
-
-	for (idx, node) in nodes.iter().enumerate() {
-		let before = nodes_balance[idx];
-		let balance = node.balance().confirmed;
-		println!(
-			"[{}][{}] Balances (b/a/delta)         : {} | {} | {}",
-			node.node_id(),
-			node.alias(),
-			before,
-			balance,
-			balance - before,
-		);
-	}
+	broadcast_tx(
+		&bitcoind,
+		&nodes[starting_node_idx],
+		&nodes,
+		&mut receiver,
+		Some((&nodes[starting_node_idx], &sender_pubkey, &sender_multisig)),
+	)?;
 
 	if multisig_balance.to_sat() > 0 {
 		let balance = wallet_total_balance(&bitcoind, &mut sender_multisig)?;
 		println!(
-			"\n[{}][{}] Multisig Balances (b/a/delta): {} | {} | {}\n",
+			"\n[{}][{}] Multisig Balances (b/a/delta): {} | {} | -{}\n",
 			nodes[starting_node_idx].node_id(),
 			nodes[starting_node_idx].alias(),
 			multisig_balance,

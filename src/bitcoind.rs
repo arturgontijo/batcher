@@ -3,12 +3,34 @@ use std::{error::Error, thread::sleep, time::Duration};
 use bitcoin::{Address, Amount};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use rand::{thread_rng, Rng};
+use serde::{Deserialize, Serialize};
 
-pub fn bitcoind_client(wallet: &str) -> Result<Client, bitcoincore_rpc::Error> {
-	let auth = Auth::UserPass("local".to_string(), "local".to_string());
-	let mut bitcoind = Client::new("http://0.0.0.0:38332", auth.clone())?;
-	let _ = bitcoind.create_wallet(wallet, None, None, None, None);
-	bitcoind = Client::new(format!("http://0.0.0.0:38332/wallet/{}", wallet).as_str(), auth)?;
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct BitcoindConfig {
+	pub rpc_address: String,
+	pub rpc_user: String,
+	pub rpc_pass: String,
+}
+
+impl BitcoindConfig {
+	pub fn new(rpc_address: &str, rpc_user: &str, rpc_pass: &str) -> Self {
+		Self {
+			rpc_address: rpc_address.to_string(),
+			rpc_user: rpc_user.to_string(),
+			rpc_pass: rpc_pass.to_string(),
+		}
+	}
+}
+
+pub fn bitcoind_client(
+	rpc_address: String, rpc_user: String, rpc_pass: String, wallet: Option<&str>,
+) -> Result<Client, bitcoincore_rpc::Error> {
+	let auth = Auth::UserPass(rpc_user, rpc_pass);
+	let mut bitcoind = Client::new(&rpc_address, auth.clone())?;
+	if let Some(wallet) = wallet {
+		let _ = bitcoind.create_wallet(wallet, None, None, None, None);
+		bitcoind = Client::new(format!("{}/wallet/{}", rpc_address, wallet).as_str(), auth)?;
+	}
 	Ok(bitcoind)
 }
 

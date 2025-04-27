@@ -19,9 +19,11 @@ use bitcoin::{
 	secp256k1::{PublicKey, SecretKey},
 	Address, FeeRate, NetworkKind, Psbt, ScriptBuf, Transaction, TxIn, TxOut,
 };
-use bitcoincore_rpc::{Auth, Client};
+use bitcoincore_rpc::Client;
 
 use crate::{
+	bitcoind::{bitcoind_client, BitcoindConfig},
+	config::BrokerConfig,
 	messages::{BatchMessage, BatchMessageHandler},
 	types::PersistedWallet,
 	wallet::sync_wallet,
@@ -31,6 +33,7 @@ use crate::{
 pub struct Broker {
 	pub node_id: PublicKey,
 	pub node_alias: String,
+	pub config: BrokerConfig,
 	pub custom_message_handler: Arc<BatchMessageHandler>,
 	pub pubkey: PublicKey,
 	pub wif: String,
@@ -42,14 +45,12 @@ pub struct Broker {
 
 impl Broker {
 	pub fn new(
-		node_id: PublicKey, node_alias: String, seed_bytes: &[u8; 32], network: Network,
-		db_path: String, custom_message_handler: Arc<BatchMessageHandler>,
+		node_id: PublicKey, node_alias: String, wallet_secret: &[u8; 32], network: Network,
+		config: BrokerConfig, bitcoind_config: BitcoindConfig, db_path: String,
+		custom_message_handler: Arc<BatchMessageHandler>,
 	) -> Result<Self, Box<dyn Error>> {
-		let auth = Auth::UserPass("local".to_string(), "local".to_string());
-		let bitcoind_client = Arc::new(Client::new("http://0.0.0.0:38332", auth.clone())?);
-
 		let secp = Secp256k1::new();
-		let secret_key = SecretKey::from_slice(seed_bytes)?;
+		let secret_key = SecretKey::from_slice(wallet_secret)?;
 		let pubkey = PublicKey::from_secret_key(&secp, &secret_key);
 
 		let wif =
@@ -57,21 +58,24 @@ impl Broker {
 				.to_wif();
 
 		let mut persister = Connection::open(db_path)?;
-		let wallet = Self::create_wallet(seed_bytes, network, &mut persister)?;
+		let wallet = Self::create_wallet(wallet_secret, network, &mut persister)?;
 
 		let wallets = Arc::new(Mutex::new(HashMap::from([(pubkey, wallet)])));
 
 		let batch_psbts = Arc::new(Mutex::new(vec![]));
 
+		let BitcoindConfig { rpc_address, rpc_user, rpc_pass } = bitcoind_config;
+
 		Ok(Broker {
 			node_id,
 			node_alias,
+			config,
 			custom_message_handler,
 			pubkey,
 			wif,
 			wallets,
 			batch_psbts,
-			bitcoind_client,
+			bitcoind_client: Arc::new(bitcoind_client(rpc_address, rpc_user, rpc_pass, None)?),
 			persister: Arc::new(Mutex::new(persister)),
 		})
 	}
@@ -246,7 +250,7 @@ impl Broker {
 		max_count: u8, uniform_amount: Option<Amount>, fee: Amount, payer: bool,
 	) -> Result<(), Box<dyn Error>> {
 		let mut count = 0;
-		let mut receiver_utxos_value = Amount::from_sat(0);
+		let mut utxos_value = Amount::from_sat(0);
 
 		let redeem_script = if let Some(other) = other_opt {
 			Some(
@@ -303,7 +307,7 @@ impl Broker {
 					..Default::default()
 				});
 				psbt.unsigned_tx.input.push(input);
-				receiver_utxos_value += utxo.txout.value;
+				utxos_value += utxo.txout.value;
 
 				count += 1;
 				if count >= max_count {
@@ -312,14 +316,23 @@ impl Broker {
 			};
 		}
 
-		let mut value = receiver_utxos_value;
+		let mut value = utxos_value;
 		if payer {
+			// We do not have enough funds for target total fee
+			if value <= fee {
+				return Err("Payer has not enought funds for fee.".into());
+			}
 			value -= fee;
 		} else {
 			value += fee
 		}
 
 		if let Some(uniform_amount) = uniform_amount {
+			// We do not have enough funds for target uniform_amount
+			if value <= uniform_amount {
+				return Err("Participant has not enought funds for target uniform_amount.".into());
+			}
+
 			let script_pubkey =
 				wallet.reveal_next_address(KeychainKind::External).address.script_pubkey();
 
