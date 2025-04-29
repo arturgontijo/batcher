@@ -3,21 +3,27 @@ mod common;
 use std::{error::Error, sync::Arc};
 
 use batcher::{
-	bitcoind::{bitcoind_client, fund_address, wait_for_block, BitcoindConfig},
+	bitcoind::{fund_address, setup_bitcoind, wait_for_block},
 	config::{BrokerConfig, NodeConfig},
 	node::Node,
 	wallet::create_wallet,
 };
 
 use bdk_wallet::KeychainKind;
-use bitcoin::{absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeRate, Network};
+use bitcoin::{
+	absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeRate, Network, Psbt,
+};
 use common::{broadcast_tx, setup_nodes};
 
 #[test]
 fn node_from_config() -> Result<(), Box<dyn Error>> {
-	let network = Network::Signet;
+	let network = Network::Regtest;
 
-	let config = NodeConfig::new("config.toml")?;
+	let bitcoind = setup_bitcoind()?;
+
+	let mut config = NodeConfig::new("config.toml")?;
+	config.bitcoind_config.rpc_address = bitcoind.rpc_url();
+
 	let bitcoind_config = config.bitcoind_config.clone();
 
 	let broker_config = BrokerConfig::new(vec![], 25_000, 2);
@@ -52,18 +58,15 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 
 	others.push(np_node.clone());
 
-	let node = Node::new_from_config(config.clone())?;
+	let node = Arc::new(Node::new_from_config(config.clone())?);
 	node.start()?;
 
-	let BitcoindConfig { rpc_address, rpc_user, rpc_pass } = bitcoind_config;
-	let bitcoind = bitcoind_client(rpc_address, rpc_user, rpc_pass, Some("miner"))?;
-
-	fund_address(&bitcoind, node.wallet_new_address()?, Amount::from_sat(1_000_000), 5)?;
+	fund_address(&bitcoind.client, node.wallet_new_address()?, Amount::from_sat(1_000_000), 5)?;
 	for node in &others {
-		fund_address(&bitcoind, node.wallet_new_address()?, Amount::from_sat(1_000_000), 5)?;
+		fund_address(&bitcoind.client, node.wallet_new_address()?, Amount::from_sat(1_000_000), 5)?;
 	}
 
-	wait_for_block(&bitcoind, 2)?;
+	wait_for_block(&bitcoind.client, 2)?;
 
 	//            N0
 	//          /
@@ -72,14 +75,8 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 	//            N2
 
 	node.sync_wallet(false)?;
-	np_node.sync_wallet(false)?;
 	for node in &others {
 		node.sync_wallet(false)?;
-	}
-
-	println!("[{}][{}] Balance: {}", node.node_id(), node.alias(), node.balance().confirmed);
-	for node in &others {
-		println!("[{}][{}] Balance: {}", node.node_id(), node.alias(), node.balance().confirmed);
 	}
 
 	// Starting Batch workflow
@@ -92,7 +89,7 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 	let uniform_amount = true;
 	let fee_rate = FeeRate::from_sat_per_vb(DEFAULT_MIN_RELAY_TX_FEE as u64).unwrap();
 	let locktime: LockTime = LockTime::ZERO;
-	let max_utxo_count = 4;
+	let max_utxo_per_participant = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
 	let max_participants = 3;
 	let max_hops = 4;
@@ -106,14 +103,54 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 		uniform_amount,
 		fee_per_participant,
 		max_participants,
-		max_utxo_count,
+		max_utxo_per_participant,
 		max_hops,
 	)?;
 
-	broadcast_tx(&bitcoind, &node, &others, &mut receiver, None)?;
+	others.push(node.clone());
 
-	println!("[{}][{}] Stopping...", node.node_id(), node.alias());
-	node.stop()?;
+	broadcast_tx(&bitcoind.client, &node, &others, &mut receiver, None)?;
+
+	// Foreign workflow
+	println!("\n----- Foreign workflow -----\n");
+
+	node.sync_wallet(false)?;
+	for node in &others {
+		node.sync_wallet(false)?;
+	}
+
+	let script_pubkey =
+		receiver.reveal_next_address(KeychainKind::External).address.script_pubkey();
+	let change_scriptbuf = np_node.wallet_new_address()?.script_pubkey();
+	let utxos = np_node.broker.list_unspent()?;
+
+	node.build_foreign_psbt(
+		change_scriptbuf,
+		script_pubkey,
+		amount,
+		utxos[..2].to_vec(),
+		locktime,
+		uniform_amount,
+		fee_per_participant,
+		max_participants,
+		max_utxo_per_participant,
+		max_hops,
+	)?;
+
+	let mut batch_psbts = node.broker.get_batch_psbts()?;
+	while batch_psbts.is_empty() {
+		wait_for_block(&bitcoind.client, 2)?;
+		batch_psbts = node.broker.get_batch_psbts()?;
+	}
+
+	let psbt_hex = batch_psbts.first().unwrap();
+	let mut psbt = Psbt::deserialize(&psbt_hex)?;
+
+	np_node.sign_psbt(&mut psbt)?;
+	np_node.broker.push_to_batch_psbts(psbt.serialize())?;
+
+	broadcast_tx(&bitcoind.client, &np_node, &others, &mut receiver, None)?;
+
 	for node in &others {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
 		node.stop()?;

@@ -1,7 +1,7 @@
 mod common;
 
-use batcher::bitcoind;
 use batcher::bitcoind::BitcoindConfig;
+use batcher::bitcoind::{self, setup_bitcoind};
 use batcher::config::BrokerConfig;
 use batcher::wallet;
 
@@ -15,7 +15,7 @@ use bitcoin::{
 	Amount, FeeRate, Network, NetworkKind,
 };
 
-use bitcoind::{bitcoind_client, fund_address, wait_for_block};
+use bitcoind::{fund_address, wait_for_block};
 use common::{broadcast_tx, setup_nodes};
 use wallet::{create_sender_multisig, create_wallet, wallet_total_balance};
 
@@ -26,25 +26,29 @@ use tokio::time::Duration;
 
 #[test]
 fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
-	let network = Network::Signet;
+	let network = Network::Regtest;
 
-	let bitcoind_config = BitcoindConfig::new("http://0.0.0.0:38332", "local", "local");
+	let bitcoind = setup_bitcoind()?;
+
+	let bitcoind_config = BitcoindConfig::new(&bitcoind.rpc_url(), "bitcoind", "bitcoind");
 
 	let broker_config = BrokerConfig::new(vec![], 25_000, 4);
 	let nodes = setup_nodes(12, 7777, network, bitcoind_config.clone(), broker_config)?;
-
-	let BitcoindConfig { rpc_address, rpc_user, rpc_pass } = bitcoind_config;
-	let bitcoind = bitcoind_client(rpc_address, rpc_user, rpc_pass, Some("miner"))?;
 
 	for (idx, node) in nodes.iter().enumerate() {
 		// N2 and N10 must have no UTXOs
 		if idx == 2 || idx == 10 {
 			continue;
 		}
-		fund_address(&bitcoind, node.wallet_new_address()?, Amount::from_sat(1_000_000), 10)?;
+		fund_address(
+			&bitcoind.client,
+			node.wallet_new_address()?,
+			Amount::from_sat(1_000_000),
+			10,
+		)?;
 	}
 
-	wait_for_block(&bitcoind, 2)?;
+	wait_for_block(&bitcoind.client, 2)?;
 
 	for node in &nodes {
 		node.sync_wallet(true)?;
@@ -123,11 +127,11 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	let multisig_funding_addr = nodes[starting_node_idx].multisig_new_address(&sender_pubkey)?;
 
 	// Funding multisig
-	fund_address(&bitcoind, multisig_funding_addr, Amount::from_sat(1_000_000), 10)?;
-	wait_for_block(&bitcoind, 2)?;
+	fund_address(&bitcoind.client, multisig_funding_addr, Amount::from_sat(1_000_000), 10)?;
+	wait_for_block(&bitcoind.client, 2)?;
 
 	nodes[starting_node_idx].multisig_sync(&sender_pubkey, true)?;
-	let multisig_balance = wallet_total_balance(&bitcoind, &mut sender_multisig)?;
+	let multisig_balance = wallet_total_balance(&bitcoind.client, &mut sender_multisig)?;
 
 	println!(
 		"MultisigNode(balance)   -> {}",
@@ -149,7 +153,7 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	)?;
 
 	broadcast_tx(
-		&bitcoind,
+		&bitcoind.client,
 		&nodes[starting_node_idx],
 		&nodes,
 		&mut receiver,
@@ -157,7 +161,7 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	)?;
 
 	if multisig_balance.to_sat() > 0 {
-		let balance = wallet_total_balance(&bitcoind, &mut sender_multisig)?;
+		let balance = wallet_total_balance(&bitcoind.client, &mut sender_multisig)?;
 		println!(
 			"\n[{}][{}] Multisig Balances (b/a/delta): {} | {} | -{}\n",
 			nodes[starting_node_idx].node_id(),

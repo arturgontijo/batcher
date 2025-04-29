@@ -1,6 +1,6 @@
 [package]
 name = "batcher"
-version = "0.0.8"
+version = "0.0.9"
 edition = "2021"
 
 [lib]
@@ -20,3 +20,4 @@ bitcoin = { version = "0.32.2", default-features = false, features = ["secp-reco
 bip39 = "2.1.0"
 serde = "1.0.219"
 toml = { version ="0.8.21", features = ["parse"] }
+bitcoind = "0.36.1"

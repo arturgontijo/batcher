@@ -1,7 +1,8 @@
-use std::{error::Error, thread::sleep, time::Duration};
+use std::{env, error::Error};
 
 use bitcoin::{Address, Amount};
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use bitcoincore_rpc::{json::AddressType, Auth, Client, RpcApi};
+use bitcoind::BitcoinD;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 
@@ -26,17 +27,18 @@ pub fn bitcoind_client(
 	rpc_address: String, rpc_user: String, rpc_pass: String, wallet: Option<&str>,
 ) -> Result<Client, bitcoincore_rpc::Error> {
 	let auth = Auth::UserPass(rpc_user, rpc_pass);
-	let mut bitcoind = Client::new(&rpc_address, auth.clone())?;
+	let mut client = Client::new(&rpc_address, auth.clone())?;
 	if let Some(wallet) = wallet {
-		let _ = bitcoind.create_wallet(wallet, None, None, None, None);
-		bitcoind = Client::new(format!("{}/wallet/{}", rpc_address, wallet).as_str(), auth)?;
+		let _ = client.create_wallet(wallet, None, None, None, None);
+		client = Client::new(format!("{}/wallet/{}", rpc_address, wallet).as_str(), auth)?;
 	}
-	Ok(bitcoind)
+	Ok(client)
 }
 
 pub fn fund_address(
 	client: &Client, address: Address, amount: Amount, utxos: u16,
 ) -> Result<(), Box<dyn Error>> {
+	let _ = client.load_wallet("miner");
 	let mut rng = thread_rng();
 	for _ in 0..utxos {
 		// range -15% and +15%
@@ -54,19 +56,30 @@ pub fn fund_address(
 			None,
 		)?;
 	}
+	wait_for_block(client, 1)?;
 	Ok(())
 }
 
-pub fn wait_for_block(bitcoind: &Client, blocks: u64) -> Result<(), Box<dyn Error>> {
-	let initial_block = bitcoind.get_block_count()?;
-	let target_block = initial_block + blocks;
-	loop {
-		let block_num = bitcoind.get_block_count()?;
-		if block_num >= target_block {
-			break;
-		}
-		println!("    -> Block {:?} [target={:?}]", block_num, target_block);
-		sleep(Duration::from_secs(11));
-	}
+pub fn setup_bitcoind() -> Result<BitcoinD, Box<dyn Error>> {
+	let bitcoind_exe = env::var("BITCOIND_EXE")
+		.ok()
+		.or_else(|| bitcoind::downloaded_exe_path().ok())
+		.expect("bitcoind not found");
+	let mut conf = bitcoind::Conf::default();
+	conf.args.push("-rpcauth=bitcoind:cccd5d7fd36e55c1b8576b8077dc1b83$60b5676a09f8518dcb4574838fb86f37700cd690d99bd2fdc2ea2bf2ab80ead6");
+	conf.args.push("-txindex");
+	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &conf)?;
+	let _ = bitcoind.client.create_wallet("miner", None, None, None, None);
+	wait_for_block(&bitcoind.client, 110)?;
+	Ok(bitcoind)
+}
+
+pub fn wait_for_block(client: &Client, blocks: u64) -> Result<(), Box<dyn Error>> {
+	let _ = client.load_wallet("miner");
+	let address = client
+		.get_new_address(Some("miner"), Some(AddressType::Legacy))
+		.expect("failed to get new address")
+		.assume_checked();
+	client.generate_to_address(blocks, &address)?;
 	Ok(())
 }

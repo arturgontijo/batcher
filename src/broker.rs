@@ -17,9 +17,9 @@ use bitcoin::{
 	opcodes,
 	psbt::{Input, Output},
 	secp256k1::{PublicKey, SecretKey},
-	Address, FeeRate, NetworkKind, Psbt, ScriptBuf, Transaction, TxIn, TxOut,
+	Address, FeeRate, NetworkKind, Psbt, ScriptBuf, Transaction, TxIn, TxOut, Weight,
 };
-use bitcoincore_rpc::Client;
+use bitcoincore_rpc::{Client, RpcApi};
 
 use crate::{
 	bitcoind::{bitcoind_client, BitcoindConfig},
@@ -350,6 +350,77 @@ impl Broker {
 		psbt.unsigned_tx.output.push(output);
 
 		Ok(())
+	}
+
+	pub fn build_foreign_psbt(
+		&self, change_scriptbuf: ScriptBuf, output_script: ScriptBuf, amount: Amount,
+		utxos: Vec<LocalOutput>, locktime: LockTime, uniform_amount: Option<Amount>,
+		fee_per_participant: Amount, max_participants: u8, max_utxo_per_participant: u8,
+	) -> Result<Psbt, Box<dyn Error>> {
+		let mut wallets = self.wallets.lock().unwrap();
+		if let Some(wallet) = wallets.get_mut(&self.pubkey) {
+			let mut tx_builder = wallet.build_tx();
+
+			tx_builder.manually_selected_only();
+			let mut total_value = Amount::ZERO;
+			for utxo in utxos {
+				let tx = self.bitcoind_client.get_raw_transaction(&utxo.outpoint.txid, None)?;
+				let input = Input {
+					non_witness_utxo: Some(tx),
+					witness_utxo: Some(utxo.txout.clone()),
+					..Default::default()
+				};
+
+				println!(
+					"[{}][{}] Adding Foreign UTXO [txid={:?} | vout={:?} | amt={}]",
+					self.node_id,
+					self.node_alias,
+					utxo.outpoint.txid,
+					utxo.outpoint.vout,
+					utxo.txout.value
+				);
+
+				tx_builder.add_foreign_utxo(utxo.outpoint, input, Weight::from_vb_unwrap(2))?;
+				total_value += utxo.txout.value;
+			}
+
+			// +1 to cover tx fee
+			let total_fee = fee_per_participant * ((max_participants + 1) as u64);
+			let change = total_value - amount - total_fee;
+
+			tx_builder
+				.add_recipient(output_script.clone(), amount)
+				.add_recipient(change_scriptbuf.clone(), change)
+				.nlocktime(locktime);
+
+			let wallet_psbt = tx_builder.finish()?;
+			let mut psbt = wallet_psbt.clone();
+
+			let mut outputs = vec![];
+			for output in wallet_psbt.unsigned_tx.output {
+				if output.script_pubkey != output_script && output.script_pubkey != change_scriptbuf
+				{
+					continue;
+				}
+				outputs.push(output.clone());
+			}
+			psbt.unsigned_tx.output = outputs;
+
+			// Adding our own UTXOs too
+			let max_count = self.config.max_utxo_count.min(max_utxo_per_participant);
+			self._add_utxos_to_psbt(
+				wallet,
+				None,
+				&mut psbt,
+				max_count,
+				uniform_amount,
+				fee_per_participant,
+				false,
+			)?;
+
+			return Ok(psbt);
+		}
+		Err("Can't build the PSBT!".into())
 	}
 
 	pub fn multisig_sign_psbt(

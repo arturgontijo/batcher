@@ -5,7 +5,7 @@ secret = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 host = "0.0.0.0"
 port = 7070
 
-network = "signet"
+network = "regtest"
 
 # Wallet
 mnemonic = "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
@@ -23,5 +23,5 @@ max_utxo_count = 2
 # Bitcoind
 [bitcoind_config]
 rpc_address = "127.0.0.1:38332"
-rpc_user = "local"
-rpc_pass = "local"
+rpc_user = "bitcoind"
+rpc_pass = "bitcoind"

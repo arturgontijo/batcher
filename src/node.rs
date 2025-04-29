@@ -8,7 +8,7 @@ use crate::messages::{BatchMessage, BatchMessageHandler};
 use crate::persister::InMemoryPersister;
 use crate::types::{ChainMonitor, ChannelManager, FixedFeeEstimator, MockBroadcaster, PeerManager};
 
-use bdk_wallet::Balance;
+use bdk_wallet::{Balance, LocalOutput};
 use bip39::{Language, Mnemonic};
 use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{self, Duration};
 
+#[derive(Clone)]
 pub struct Node {
 	id: PublicKey,
 	alias: String,
@@ -552,6 +553,10 @@ impl Node {
 		self.broker.multisig_add_utxos_to_psbt(other, psbt, max_count, uniform_amount, fee, payer)
 	}
 
+	pub fn sign_psbt(&self, psbt: &mut Psbt) -> Result<(), Box<dyn Error>> {
+		self.broker.sign_psbt(psbt)
+	}
+
 	pub fn multisig_sign_psbt(
 		&self, other: &PublicKey, psbt: &mut Psbt,
 	) -> Result<(), Box<dyn Error>> {
@@ -560,5 +565,49 @@ impl Node {
 
 	pub fn broadcast_transactions(&self, txs: &[&Transaction]) -> Result<(), Box<dyn Error>> {
 		self.broker.broadcast_transactions(txs)
+	}
+
+	pub fn build_foreign_psbt(
+		&self, change_scriptbuf: ScriptBuf, output_script: ScriptBuf, amount: Amount,
+		utxos: Vec<LocalOutput>, locktime: LockTime, uniform_amount: bool,
+		fee_per_participant: Amount, max_participants: u8, max_utxo_per_participant: u8,
+		max_hops: u8,
+	) -> Result<(), Box<dyn Error>> {
+		if let Some(pd) = self.peer_manager.list_peers().first() {
+			let uniform_amount_opt = if uniform_amount { Some(amount) } else { None };
+
+			let psbt = self.broker.build_foreign_psbt(
+				change_scriptbuf,
+				output_script,
+				amount,
+				utxos,
+				locktime,
+				uniform_amount_opt,
+				fee_per_participant,
+				max_participants,
+				max_utxo_per_participant,
+			)?;
+
+			let batch_psbt = BatchMessage::BatchPsbt {
+				sender_node_id: self.node_id(),
+				receiver_node_id: pd.counterparty_node_id,
+				uniform_amount: if uniform_amount_opt.is_some() { amount.to_sat() } else { 0 },
+				fee_per_participant: fee_per_participant.to_sat(),
+				max_utxo_per_participant,
+				max_participants,
+				max_hops,
+				participants: vec![self.node_id()],
+				endpoints: vec![self.endpoint()],
+				not_participants: vec![],
+				hops: 0,
+				psbt: psbt.serialize(),
+				sign: false,
+			};
+
+			self.broker.send(pd.counterparty_node_id, batch_psbt)?;
+
+			return Ok(());
+		}
+		Err("Can't build the PSBT!".into())
 	}
 }

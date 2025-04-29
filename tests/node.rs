@@ -1,7 +1,7 @@
 mod common;
 
-use batcher::bitcoind;
 use batcher::bitcoind::BitcoindConfig;
+use batcher::bitcoind::{self, setup_bitcoind};
 use batcher::config::BrokerConfig;
 use batcher::node::Node;
 use batcher::wallet;
@@ -10,7 +10,7 @@ use bdk_wallet::KeychainKind;
 use bitcoin::{absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeRate, Network};
 
 use bitcoincore_rpc::Client;
-use bitcoind::{bitcoind_client, fund_address, wait_for_block};
+use bitcoind::{fund_address, wait_for_block};
 use common::{broadcast_tx, setup_nodes};
 use wallet::create_wallet;
 
@@ -20,19 +20,16 @@ use std::thread::sleep;
 use tokio::time::Duration;
 
 fn setup_network(
-	network: Network, bitcoind_config: BitcoindConfig,
-) -> Result<(Client, Vec<Arc<Node>>), Box<dyn Error>> {
+	client: &Client, network: Network, bitcoind_config: BitcoindConfig,
+) -> Result<Vec<Arc<Node>>, Box<dyn Error>> {
 	let broker_config = BrokerConfig::new(vec![], 25_000, 2);
 	let nodes = setup_nodes(8, 7777, network, bitcoind_config.clone(), broker_config)?;
 
-	let BitcoindConfig { rpc_address, rpc_user, rpc_pass } = bitcoind_config;
-	let bitcoind = bitcoind_client(rpc_address, rpc_user, rpc_pass, Some("miner"))?;
-
 	for node in &nodes {
-		fund_address(&bitcoind, node.wallet_new_address()?, Amount::from_sat(1_000_000), 10)?;
+		fund_address(&client, node.wallet_new_address()?, Amount::from_sat(1_000_000), 10)?;
 	}
 
-	wait_for_block(&bitcoind, 2)?;
+	wait_for_block(&client, 2)?;
 
 	for node in &nodes {
 		node.sync_wallet(true)?;
@@ -57,16 +54,18 @@ fn setup_network(
 
 	sleep(Duration::from_millis(1_000));
 
-	Ok((bitcoind, nodes))
+	Ok(nodes)
 }
 
 #[test]
 fn batcher_as_node() -> Result<(), Box<dyn Error>> {
-	let network = Network::Signet;
+	let network = Network::Regtest;
 
-	let bitcoind_config = BitcoindConfig::new("http://0.0.0.0:38332", "local", "local");
+	let bitcoind = setup_bitcoind()?;
 
-	let (bitcoind, nodes) = setup_network(network, bitcoind_config)?;
+	let bitcoind_config = BitcoindConfig::new(&bitcoind.rpc_url(), "bitcoind", "bitcoind");
+
+	let nodes = setup_network(&bitcoind.client, network, bitcoind_config)?;
 
 	// Sender's node index
 	let starting_node_idx = 7;
@@ -112,7 +111,7 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 		max_hops,
 	)?;
 
-	broadcast_tx(&bitcoind, &nodes[starting_node_idx], &nodes, &mut receiver, None)?;
+	broadcast_tx(&bitcoind.client, &nodes[starting_node_idx], &nodes, &mut receiver, None)?;
 
 	let max_hops = 3;
 
@@ -133,7 +132,7 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 		max_hops,
 	)?;
 
-	broadcast_tx(&bitcoind, &nodes[starting_node_idx], &nodes, &mut receiver, None)?;
+	broadcast_tx(&bitcoind.client, &nodes[starting_node_idx], &nodes, &mut receiver, None)?;
 
 	for node in &nodes {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());

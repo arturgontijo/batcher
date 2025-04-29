@@ -80,7 +80,6 @@ pub(crate) fn process_batch_messages(
 			println!("\n[{}][{}] BatchPsbt: Too many hops [{}/{}], routing it back to last participant...", node_id, node_alias, hops, max_hops);
 			return broker.send(last_participant_id, msg);
 		}
-		hops = hops.saturating_add(1);
 
 		let mut psbt = Psbt::deserialize(&psbt).unwrap();
 
@@ -183,6 +182,8 @@ pub(crate) fn process_batch_messages(
 					break;
 				}
 			}
+
+			hops = hops.saturating_add(1);
 
 			let psbt = psbt.serialize();
 
