@@ -11,7 +11,7 @@ use bitcoin::{absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeR
 
 use bitcoincore_rpc::Client;
 use bitcoind::{fund_address, wait_for_block};
-use common::{broadcast_tx, setup_nodes};
+use common::{broadcast_tx, create_temp_dir, remove_temp_dir, setup_nodes};
 use wallet::create_wallet;
 
 use std::error::Error;
@@ -63,6 +63,8 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 
 	let bitcoind = setup_bitcoind()?;
 
+	let temp_dir = create_temp_dir("batcher_as_node")?;
+
 	let bitcoind_config = BitcoindConfig::new(&bitcoind.rpc_url(), "bitcoind", "bitcoind");
 
 	let nodes = setup_network(&bitcoind.client, network, bitcoind_config)?;
@@ -74,7 +76,7 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 
 	// Starting Batch workflow
 	let mut receiver =
-		create_wallet(&[255u8; 64], network, "/tmp/batcher/receiver.db".to_string())?;
+		create_wallet(&[255u8; 64], network, format!("{}/receiver.db", temp_dir.display()))?;
 
 	let amount = Amount::from_sat(777_777);
 	let script_pubkey =
@@ -138,6 +140,8 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
 		node.stop()?;
 	}
+
+	remove_temp_dir("batcher_as_node")?;
 
 	Ok(())
 }

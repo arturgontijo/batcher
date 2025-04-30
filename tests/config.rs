@@ -13,7 +13,7 @@ use bdk_wallet::KeychainKind;
 use bitcoin::{
 	absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeRate, Network, Psbt,
 };
-use common::{broadcast_tx, setup_nodes};
+use common::{broadcast_tx, create_temp_dir, remove_temp_dir, setup_nodes};
 
 #[test]
 fn node_from_config() -> Result<(), Box<dyn Error>> {
@@ -21,8 +21,11 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 
 	let bitcoind = setup_bitcoind()?;
 
+	let temp_dir = create_temp_dir("node_from_config")?;
+
 	let mut config = NodeConfig::new("config.toml")?;
 	config.bitcoind_config.rpc_address = bitcoind.rpc_url();
+	config.db_path = format!("{}/wallet_from_config.db", temp_dir.display());
 
 	let bitcoind_config = config.bitcoind_config.clone();
 
@@ -38,7 +41,7 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 		network,
 		mnemonic: "egg glad reflect finish crash veteran tiny dance blouse garlic stock solution"
 			.to_string(),
-		db_path: "/tmp/batcher/wallet_np.db".to_string(),
+		db_path: format!("{}/wallet_np.db", temp_dir.display()),
 		broker_config: BrokerConfig {
 			bootnodes: vec![
 				// Node[0]
@@ -74,14 +77,14 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 	//          \
 	//            N2
 
-	node.sync_wallet(false)?;
+	node.sync_wallet(true)?;
 	for node in &others {
 		node.sync_wallet(false)?;
 	}
 
 	// Starting Batch workflow
 	let mut receiver =
-		create_wallet(&[255u8; 64], network, "/tmp/batcher/receiver.db".to_string())?;
+		create_wallet(&[255u8; 64], network, format!("{}/receiver.db", temp_dir.display()))?;
 
 	let amount = Amount::from_sat(777_777);
 	let script_pubkey =
@@ -155,6 +158,8 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
 		node.stop()?;
 	}
+
+	remove_temp_dir("node_from_config")?;
 
 	Ok(())
 }

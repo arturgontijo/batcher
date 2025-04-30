@@ -4,7 +4,7 @@ use bitcoincore_rpc::{Client, RpcApi};
 use node::Node;
 use rand::Rng;
 
-use std::{error::Error, sync::Arc, thread::sleep};
+use std::{error::Error, fs, io, path::PathBuf, sync::Arc, thread::sleep};
 use tokio::time::Duration;
 
 use batcher::{
@@ -21,6 +21,7 @@ pub fn setup_nodes(
 ) -> Result<Vec<Arc<Node>>, Box<dyn Error>> {
 	let mut nodes = vec![];
 	let mut rng = rand::thread_rng();
+	let temp_dir = create_temp_dir("temp")?;
 	for i in 0..count {
 		let secret: [u8; 32] = rng.gen();
 		let wallet_secret: [u8; 32] = rng.gen();
@@ -34,7 +35,7 @@ pub fn setup_nodes(
 			network,
 			bitcoind_config.clone(),
 			&wallet_secret,
-			format!("/tmp/batcher/wallet_{}.db", wallet_name),
+			format!("{}/wallet_{}.db", temp_dir.display(), wallet_name),
 			broker_config.clone(),
 		)?);
 		let node_clone = node.clone();
@@ -44,6 +45,23 @@ pub fn setup_nodes(
 	}
 	sleep(Duration::from_secs(1));
 	Ok(nodes)
+}
+
+pub fn create_temp_dir(dir_name: &str) -> io::Result<PathBuf> {
+	let temp_dir = std::env::temp_dir().join(dir_name);
+	if temp_dir.exists() {
+		fs::remove_dir_all(&temp_dir)?;
+	}
+	fs::create_dir(&temp_dir)?;
+	Ok(temp_dir)
+}
+
+pub fn remove_temp_dir(dir_name: &str) -> io::Result<()> {
+	let temp_dir = std::env::temp_dir().join(dir_name);
+	if temp_dir.exists() {
+		fs::remove_dir_all(&temp_dir)?;
+	}
+	Ok(())
 }
 
 pub fn broadcast_tx(
