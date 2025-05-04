@@ -7,5 +7,6 @@ pub mod logger;
 pub mod messages;
 pub mod node;
 pub mod persister;
+pub mod storage;
 pub mod types;
 pub mod wallet;

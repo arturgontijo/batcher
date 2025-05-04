@@ -1,0 +1,250 @@
+use batcher::{config::NodeConfig, node::Node};
+use bitcoin::{absolute::LockTime, secp256k1::PublicKey, Amount, FeeRate, Psbt, ScriptBuf};
+use bitcoincore_rpc::RpcApi;
+use std::{
+	error::Error,
+	sync::{Arc, RwLock},
+	thread::sleep,
+	time::Duration,
+};
+
+use std::str::FromStr;
+
+pub fn handle_command(
+	input: &str, node: &Arc<RwLock<Option<Arc<Node>>>>,
+) -> Result<(), Box<dyn Error>> {
+	let mut parts = input.split_whitespace();
+	let cmd = match parts.next() {
+		Some(c) => c,
+		None => return Ok(()),
+	};
+
+	match cmd {
+		"start" => {
+			let config = parts.next();
+			match config {
+				Some(config) => {
+					let mut unlocked = node.write().unwrap();
+					if let Some(node) = unlocked.clone() {
+						println!("[{}][{}] Node is already running.", node.node_id(), node.alias());
+					} else {
+						let config = NodeConfig::new(config)?;
+						let _node = Node::new_from_config(config.clone())?;
+						println!("[{}][{}] Starting Node...", _node.node_id(), _node.alias());
+						_node.start()?;
+						*unlocked = Some(Arc::new(_node));
+					}
+				},
+				_ => {
+					println!("Usage: start <config.toml>");
+				},
+			}
+			Ok(())
+		},
+		"stats" | "s" => {
+			let unlocked = node.read().unwrap();
+			if let Some(node) = unlocked.clone() {
+				let utxos = node.broker.list_unspent()?;
+				let mut value = Amount::ZERO;
+				for utxo in &utxos {
+					value += utxo.txout.value;
+				}
+				let psbts = node.broker.len_batch_psbts()?;
+				println!(
+					"[{}][{}] Stats: peers={} | utxos={} | value={} | psbts={}",
+					node.node_id(),
+					node.alias(),
+					node.peer_manager.list_peers().len(),
+					utxos.len(),
+					value,
+					psbts,
+				);
+			} else {
+				println!("Node is not running.");
+			}
+			Ok(())
+		},
+		"peers" | "lp" => {
+			let unlocked = node.read().unwrap();
+			if let Some(node) = unlocked.clone() {
+				let peers = node.peer_manager.list_peers();
+				if peers.is_empty() {
+					println!("[{}][{}] No connected peers!", node.node_id(), node.alias());
+				} else {
+					for peer in peers {
+						println!(
+							"[{}][{}] Peer: ({}, {})",
+							node.node_id(),
+							node.alias(),
+							peer.counterparty_node_id,
+							peer.socket_address.unwrap(),
+						);
+					}
+				}
+			} else {
+				println!("Node is not running.");
+			}
+			Ok(())
+		},
+		"connect" | "c" => {
+			let node_id = parts.next();
+			let address = parts.next();
+			match (node_id, address) {
+				(Some(node_id), Some(address)) => {
+					let unlocked = node.read().unwrap();
+					if let Some(node) = unlocked.clone() {
+						let pubkey = PublicKey::from_str(node_id).unwrap();
+						node.connect(pubkey, address.to_string())?;
+						let mut checks = 0;
+						while !node.is_peer_connected(&pubkey) {
+							sleep(Duration::from_millis(100));
+							checks += 1;
+							if checks >= 5 {
+								break;
+							}
+						}
+						if checks < 5 {
+							println!(
+								"[{}][{}] Connected to peer {} @ {}",
+								node.node_id(),
+								node.alias(),
+								node_id,
+								address
+							);
+						} else {
+							println!(
+								"[{}][{}] Unable to connect to peer {} @ {}",
+								node.node_id(),
+								node.alias(),
+								node_id,
+								address
+							);
+						}
+					} else {
+						println!("Node is not running.");
+					}
+				},
+				_ => {
+					println!("Usage: connect <NODE_ID> <HOST:PORT>");
+				},
+			}
+			Ok(())
+		},
+		"addr" | "na" => {
+			let unlocked = node.read().unwrap();
+			if let Some(node) = unlocked.clone() {
+				let addr = node.wallet_new_address()?;
+				println!("[{}][{}] Address: {}", node.node_id(), node.alias(), addr);
+			} else {
+				println!("Node is not running.");
+			}
+			Ok(())
+		},
+		// b 0014ccf585117d810bc3ad692ae28b8bfc87df6e0075 777777 99999
+		"batch" | "b" => {
+			let output_script = parts.next();
+			let amount = parts.next();
+			let fee_per_participant = parts.next();
+			let max_participants = parts.next().unwrap_or("2");
+			let max_utxo_per_participant = parts.next().unwrap_or("2");
+			let max_hops = parts.next().unwrap_or("255");
+			let unlocked = node.read().unwrap();
+			if let Some(node) = unlocked.clone() {
+				match (output_script, amount, fee_per_participant) {
+					(Some(output_script), Some(amount), Some(fee_per_participant)) => {
+						match node.peer_manager.list_peers().first() {
+							Some(pd) => {
+								node.init_psbt_batch(
+									pd.counterparty_node_id,
+									ScriptBuf::from_hex(output_script).unwrap(),
+									Amount::from_sat(amount.parse()?),
+									FeeRate::from_sat_per_vb_unchecked(50),
+									LockTime::ZERO,
+									true,
+									Amount::from_sat(fee_per_participant.parse()?),
+									max_participants.parse()?,
+									max_utxo_per_participant.parse()?,
+									max_hops.parse()?,
+								)?;
+								println!("Batch initialized, check 'stats' for ready PSBTs.")
+							},
+							None => println!("No connected peers!"),
+						}
+					},
+					_ => {
+						println!(
+							"Usage: batch <RECEIVER_ADDR> <AMOUNT_SATS> <FEE_PER_PARTICIPANT_SATS>"
+						);
+					},
+				}
+			} else {
+				println!("Node is not running.");
+			}
+			Ok(())
+		},
+		"broadcast" | "bc" => {
+			let unlocked = node.read().unwrap();
+			if let Some(node) = unlocked.clone() {
+				match node.broker.get_batch_psbts() {
+					Ok(psbts) => {
+						if !psbts.is_empty() {
+							let psbt_bytes = psbts.first().unwrap();
+							let psbt = Psbt::deserialize(psbt_bytes).unwrap();
+							let tx = psbt.extract_tx()?;
+							println!("\nTx Inputs/Outputs:\n");
+							for input in tx.input.iter() {
+								let tx_info = node
+									.broker
+									.bitcoind_client
+									.get_raw_transaction_info(&input.previous_output.txid, None)?;
+								let value = tx_info.vout[input.previous_output.vout as usize].value;
+								println!("====> In  ({})", value);
+							}
+
+							for output in tx.output.iter() {
+								println!("====> Out ({})", output.value);
+							}
+
+							println!("\nSending Tx (id={})...\n", tx.compute_txid());
+
+							let tx_id = node.broadcast_transactions(&tx)?;
+							println!("Tx Sent (id={})\n", tx_id);
+						} else {
+							println!("No PSBT available yet.");
+						}
+					},
+					Err(_) => println!("Failed to fetch PSBTs from Node."),
+				}
+			} else {
+				println!("Node is not running.");
+			}
+			Ok(())
+		},
+		"help" | "h" => {
+			print_help();
+			Ok(())
+		},
+
+		unknown => {
+			println!("Unknown command: '{}'", unknown);
+			println!("Type 'help' to see available commands.");
+			Ok(())
+		},
+	}
+}
+
+pub fn print_help() {
+	println!("\nBatcher CLI:");
+	println!("  start                                                           - Start a Node");
+	println!(
+		"  s  | stats                                                      - Show Nonde stats"
+	);
+	println!(
+		"  lp | peers                                                      - List connected peers"
+	);
+	println!("  c  | connect <ID> <ADDR>                                        - Connect to a peer (eg. connect 03ef...c8a7 0.0.0.0:7000)");
+	println!("  b  | batch <RCVR_ADDR> <AMT_SATS> <FEE_PER_PARTICIPANT_SATS>    - Init a batch");
+	println!("  bc | broadcast                                                  - Broadcast a Tx from a BatchPsbt");
+	println!("  h  | help                                                       - Show this help message");
+	println!("  q  | exit | quit                                                - Exit the node\n");
+}

@@ -10,13 +10,12 @@ use bitcoin::PrivateKey;
 use bitcoin::{
 	absolute::LockTime,
 	key::Secp256k1,
-	policy::DEFAULT_MIN_RELAY_TX_FEE,
 	secp256k1::{PublicKey, SecretKey},
 	Amount, FeeRate, Network, NetworkKind,
 };
 
 use bitcoind::{fund_address, wait_for_block};
-use common::{broadcast_tx, create_temp_dir, remove_temp_dir, setup_nodes};
+use common::{broadcast_tx, connect, create_temp_dir, setup_nodes};
 use wallet::{create_sender_multisig, create_wallet, wallet_total_balance};
 
 use std::error::Error;
@@ -34,7 +33,7 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 
 	let bitcoind_config = BitcoindConfig::new(&bitcoind.rpc_url(), "bitcoind", "bitcoind");
 
-	let broker_config = BrokerConfig::new(vec![], 25_000, 4);
+	let broker_config = BrokerConfig::new(vec![], 25_000, 4, 60);
 	let nodes = setup_nodes(12, 7777, network, bitcoind_config.clone(), broker_config)?;
 
 	for (idx, node) in nodes.iter().enumerate() {
@@ -53,7 +52,7 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	wait_for_block(&bitcoind.client, 2)?;
 
 	for node in &nodes {
-		node.sync_wallet(true)?;
+		node.sync_wallet()?;
 	}
 
 	for node in &nodes {
@@ -65,17 +64,17 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	//   N0 -- N1 -- N2 -- N3 -- N4
 	//                \            \
 	//                 N9           N10 -- N11
-	nodes[0].connect(&nodes[1])?;
-	nodes[1].connect(&nodes[2])?;
-	nodes[1].connect(&nodes[5])?;
-	nodes[1].connect(&nodes[6])?;
-	nodes[6].connect(&nodes[7])?;
-	nodes[2].connect(&nodes[3])?;
-	nodes[2].connect(&nodes[9])?;
-	nodes[3].connect(&nodes[4])?;
-	nodes[4].connect(&nodes[8])?;
-	nodes[4].connect(&nodes[10])?;
-	nodes[10].connect(&nodes[11])?;
+	connect(&nodes[0], &nodes[1])?;
+	connect(&nodes[1], &nodes[2])?;
+	connect(&nodes[1], &nodes[5])?;
+	connect(&nodes[1], &nodes[6])?;
+	connect(&nodes[6], &nodes[7])?;
+	connect(&nodes[2], &nodes[3])?;
+	connect(&nodes[2], &nodes[9])?;
+	connect(&nodes[3], &nodes[4])?;
+	connect(&nodes[4], &nodes[8])?;
+	connect(&nodes[4], &nodes[10])?;
+	connect(&nodes[10], &nodes[11])?;
 
 	sleep(Duration::from_millis(1_000));
 
@@ -102,7 +101,7 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	let script_pubkey =
 		receiver.reveal_next_address(KeychainKind::External).address.script_pubkey();
 	let uniform_amount = true;
-	let fee_rate = FeeRate::from_sat_per_vb(DEFAULT_MIN_RELAY_TX_FEE as u64).unwrap();
+	let fee_rate = FeeRate::from_sat_per_vb(50).unwrap();
 	let locktime: LockTime = LockTime::ZERO;
 	let max_utxo_count = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
@@ -132,7 +131,7 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 	fund_address(&bitcoind.client, multisig_funding_addr, Amount::from_sat(1_000_000), 10)?;
 	wait_for_block(&bitcoind.client, 2)?;
 
-	nodes[starting_node_idx].multisig_sync(&sender_pubkey, true)?;
+	nodes[starting_node_idx].multisig_sync(&sender_pubkey)?;
 	let multisig_balance = wallet_total_balance(&bitcoind.client, &mut sender_multisig)?;
 
 	println!(
@@ -178,8 +177,6 @@ fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
 		node.stop()?;
 	}
-
-	remove_temp_dir("batcher_as_multisig")?;
 
 	Ok(())
 }

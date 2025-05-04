@@ -1,0 +1,37 @@
+# Node
+alias = "Node-02"
+secret = "2222222222222222222222222222222222222222222222222222222222222222"
+
+host = "0.0.0.0"
+port = 7072
+
+network = "signet"
+
+peers_db_path = "/tmp/batcher/peers_from_config_2.db"
+
+# Wallet
+[wallet]
+mnemonic = "method fury sleep maid balcony theme vendor fever text install gaze journey"
+file_path = "/tmp/batcher/wallet_from_config_2.db"
+
+# Broker
+[broker]
+# Initial nodes to connect to (eg. [(pubkey, endpoint)])
+bootnodes = [
+    ["027f921585f2ac0c7c70e36110adecfd8fd14b8a99bfb3d000a283fcac358fce88", "0.0.0.0:7070"],
+    ["0328c0ca4140f514b1f1405c385676297752c11703cd92dfe859822cf8a1898902", "0.0.0.0:7071"],
+]
+minimum_fee = 10_000
+max_utxo_count = 2
+wallet_sync_interval = 60
+
+# Logger
+[logger]
+file_path = "/tmp/batcher/logger_from_config_2.log"
+max_level = "debug"
+
+# Bitcoind
+[bitcoind]
+rpc_address = "127.0.0.1:38332"
+rpc_user = "bitcoind"
+rpc_pass = "bitcoind"

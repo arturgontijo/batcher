@@ -9,7 +9,7 @@ use tokio::time::Duration;
 
 use batcher::{
 	bitcoind::{wait_for_block, BitcoindConfig},
-	config::BrokerConfig,
+	config::{BrokerConfig, LoggerConfig},
 	node,
 	types::PersistedWallet,
 	wallet::wallet_total_balance,
@@ -33,10 +33,15 @@ pub fn setup_nodes(
 			"0.0.0.0".to_string(),
 			port,
 			network,
+			format!("{}/peers_db_{}.db", temp_dir.display(), wallet_name),
 			bitcoind_config.clone(),
 			&wallet_secret,
 			format!("{}/wallet_{}.db", temp_dir.display(), wallet_name),
 			broker_config.clone(),
+			LoggerConfig::new(
+				format!("{}/logger_{}.db", temp_dir.display(), i),
+				"info".to_string(),
+			),
 		)?);
 		let node_clone = node.clone();
 		node_clone.start()?;
@@ -47,6 +52,10 @@ pub fn setup_nodes(
 	Ok(nodes)
 }
 
+pub fn connect(node: &Node, other: &Node) -> Result<(), Box<dyn Error>> {
+	node.connect(other.node_id(), other.endpoint())
+}
+
 pub fn create_temp_dir(dir_name: &str) -> io::Result<PathBuf> {
 	let temp_dir = std::env::temp_dir().join(dir_name);
 	if temp_dir.exists() {
@@ -54,14 +63,6 @@ pub fn create_temp_dir(dir_name: &str) -> io::Result<PathBuf> {
 	}
 	fs::create_dir(&temp_dir)?;
 	Ok(temp_dir)
-}
-
-pub fn remove_temp_dir(dir_name: &str) -> io::Result<()> {
-	let temp_dir = std::env::temp_dir().join(dir_name);
-	if temp_dir.exists() {
-		fs::remove_dir_all(&temp_dir)?;
-	}
-	Ok(())
 }
 
 pub fn broadcast_tx(
@@ -92,7 +93,7 @@ pub fn broadcast_tx(
 	let tx = psbt.extract_tx()?;
 
 	for node in nodes {
-		node.sync_wallet(false)?;
+		node.sync_wallet()?;
 	}
 
 	let receiver_initial_balance = wallet_total_balance(&bitcoind_client, receiver)?;
@@ -116,14 +117,13 @@ pub fn broadcast_tx(
 
 	println!("\nSending Tx (id={})...\n", tx.compute_txid());
 
-	starting_node.broadcast_transactions(&[&tx])?;
-	let tx_id = bitcoind_client.send_raw_transaction(&tx)?;
+	let tx_id = starting_node.broadcast_transactions(&tx)?;
 	println!("Tx Sent (id={})\n", tx_id);
 
 	wait_for_block(&bitcoind_client, 3)?;
 
 	for node in nodes {
-		node.sync_wallet(false)?;
+		node.sync_wallet()?;
 	}
 
 	let balance = wallet_total_balance(&bitcoind_client, receiver)?;

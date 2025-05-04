@@ -17,13 +17,17 @@ use bitcoin::{
 	opcodes,
 	psbt::{Input, Output},
 	secp256k1::{PublicKey, SecretKey},
-	Address, FeeRate, NetworkKind, Psbt, ScriptBuf, Transaction, TxIn, TxOut, Weight,
+	Address, FeeRate, NetworkKind, Psbt, ScriptBuf, Transaction, TxIn, TxOut, Txid, Weight,
 };
 use bitcoincore_rpc::{Client, RpcApi};
+
+use lightning::log_info;
+use lightning::util::logger::Logger;
 
 use crate::{
 	bitcoind::{bitcoind_client, BitcoindConfig},
 	config::BrokerConfig,
+	logger::SimpleLogger,
 	messages::{BatchMessage, BatchMessageHandler},
 	types::PersistedWallet,
 	wallet::sync_wallet,
@@ -41,13 +45,14 @@ pub struct Broker {
 	pub batch_psbts: Arc<Mutex<Vec<Vec<u8>>>>,
 	pub bitcoind_client: Arc<Client>,
 	pub persister: Arc<Mutex<Connection>>,
+	pub logger: Arc<SimpleLogger>,
 }
 
 impl Broker {
 	pub fn new(
 		node_id: PublicKey, node_alias: String, wallet_secret: &[u8; 32], network: Network,
-		config: BrokerConfig, bitcoind_config: BitcoindConfig, db_path: String,
-		custom_message_handler: Arc<BatchMessageHandler>,
+		config: BrokerConfig, bitcoind_config: BitcoindConfig, wallet_file_path: String,
+		custom_message_handler: Arc<BatchMessageHandler>, logger: Arc<SimpleLogger>,
 	) -> Result<Self, Box<dyn Error>> {
 		let secp = Secp256k1::new();
 		let secret_key = SecretKey::from_slice(wallet_secret)?;
@@ -57,7 +62,7 @@ impl Broker {
 			bitcoin::PrivateKey { compressed: true, network: NetworkKind::Test, inner: secret_key }
 				.to_wif();
 
-		let mut persister = Connection::open(db_path)?;
+		let mut persister = Connection::open(wallet_file_path)?;
 		let wallet = Self::create_wallet(wallet_secret, network, &mut persister)?;
 
 		let wallets = Arc::new(Mutex::new(HashMap::from([(pubkey, wallet)])));
@@ -77,6 +82,7 @@ impl Broker {
 			batch_psbts,
 			bitcoind_client: Arc::new(bitcoind_client(rpc_address, rpc_user, rpc_pass, None)?),
 			persister: Arc::new(Mutex::new(persister)),
+			logger,
 		})
 	}
 
@@ -131,19 +137,19 @@ impl Broker {
 		Ok(wallet)
 	}
 
-	pub fn sync_wallet(&self, debug: bool) -> Result<(), Box<dyn Error>> {
+	pub fn sync_wallet(&self) -> Result<(), Box<dyn Error>> {
 		let mut binding = self.wallets.lock().unwrap();
 		let wallet = binding.get_mut(&self.pubkey).unwrap();
-		sync_wallet(&self.bitcoind_client, wallet, debug)?;
+		sync_wallet(&self.bitcoind_client, wallet)?;
 		let mut persister = self.persister.lock().unwrap();
 		wallet.persist(&mut persister)?;
 		Ok(())
 	}
 
-	pub fn multisig_sync(&self, other: &PublicKey, debug: bool) -> Result<(), Box<dyn Error>> {
+	pub fn multisig_sync(&self, other: &PublicKey) -> Result<(), Box<dyn Error>> {
 		let mut multisigs = self.wallets.lock().unwrap();
 		if let Some(wallet) = multisigs.get_mut(other) {
-			sync_wallet(&self.bitcoind_client, wallet, debug)?;
+			sync_wallet(&self.bitcoind_client, wallet)?;
 		}
 		Ok(())
 	}
@@ -266,7 +272,9 @@ impl Broker {
 			None
 		};
 
-		let utxos: Vec<LocalOutput> = wallet.list_unspent().collect();
+		let mut utxos: Vec<LocalOutput> = wallet.list_unspent().collect();
+		utxos.sort_by(|a, b| b.txout.value.cmp(&a.txout.value));
+
 		for utxo in utxos {
 			let mut inserted = false;
 			for input in psbt.unsigned_tx.input.clone() {
@@ -291,7 +299,8 @@ impl Broker {
 					witness: Default::default(),
 				};
 
-				println!(
+				log_info!(
+					self.logger,
 					"[{}][{}] Adding UTXO [txid={:?} | vout={:?} | amt={}]",
 					self.node_id,
 					self.node_alias,
@@ -371,7 +380,8 @@ impl Broker {
 					..Default::default()
 				};
 
-				println!(
+				log_info!(
+					self.logger,
 					"[{}][{}] Adding Foreign UTXO [txid={:?} | vout={:?} | amt={}]",
 					self.node_id,
 					self.node_alias,
@@ -463,8 +473,17 @@ impl Broker {
 		}
 	}
 
-	pub fn broadcast_transactions(&self, _txs: &[&Transaction]) -> Result<(), Box<dyn Error>> {
-		// self.broadcaster.broadcast_transactions(txs);
-		Ok(())
+	pub fn len_batch_psbts(&self) -> Result<usize, Box<dyn Error>> {
+		match self.batch_psbts.try_lock() {
+			Ok(psbts) => Ok(psbts.len()),
+			Err(_) => Ok(0),
+		}
+	}
+
+	pub fn broadcast_transaction(&self, tx: &Transaction) -> Result<Txid, Box<dyn Error>> {
+		match self.bitcoind_client.send_raw_transaction(tx) {
+			Ok(txid) => Ok(txid),
+			Err(err) => Err(format!("Failed to broadcast Tx :{}", err).into()),
+		}
 	}
 }

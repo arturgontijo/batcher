@@ -7,11 +7,11 @@ use batcher::node::Node;
 use batcher::wallet;
 
 use bdk_wallet::KeychainKind;
-use bitcoin::{absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeRate, Network};
+use bitcoin::{absolute::LockTime, Amount, FeeRate, Network};
 
 use bitcoincore_rpc::Client;
 use bitcoind::{fund_address, wait_for_block};
-use common::{broadcast_tx, create_temp_dir, remove_temp_dir, setup_nodes};
+use common::{broadcast_tx, connect, create_temp_dir, setup_nodes};
 use wallet::create_wallet;
 
 use std::error::Error;
@@ -22,7 +22,7 @@ use tokio::time::Duration;
 fn setup_network(
 	client: &Client, network: Network, bitcoind_config: BitcoindConfig,
 ) -> Result<Vec<Arc<Node>>, Box<dyn Error>> {
-	let broker_config = BrokerConfig::new(vec![], 25_000, 2);
+	let broker_config = BrokerConfig::new(vec![], 25_000, 2, 60);
 	let nodes = setup_nodes(8, 7777, network, bitcoind_config.clone(), broker_config)?;
 
 	for node in &nodes {
@@ -32,7 +32,7 @@ fn setup_network(
 	wait_for_block(&client, 2)?;
 
 	for node in &nodes {
-		node.sync_wallet(true)?;
+		node.sync_wallet()?;
 	}
 
 	for node in &nodes {
@@ -44,13 +44,13 @@ fn setup_network(
 	//   N0 -- N1       N4 -- N5 -- N6
 	//           \    /
 	//             N3
-	nodes[0].connect(&nodes[1])?;
-	nodes[1].connect(&nodes[2])?;
-	nodes[1].connect(&nodes[3])?;
-	nodes[2].connect(&nodes[4])?;
-	nodes[3].connect(&nodes[4])?;
-	nodes[4].connect(&nodes[5])?;
-	nodes[5].connect(&nodes[6])?;
+	connect(&nodes[0], &nodes[1])?;
+	connect(&nodes[1], &nodes[2])?;
+	connect(&nodes[1], &nodes[3])?;
+	connect(&nodes[2], &nodes[4])?;
+	connect(&nodes[3], &nodes[4])?;
+	connect(&nodes[4], &nodes[5])?;
+	connect(&nodes[5], &nodes[6])?;
 
 	sleep(Duration::from_millis(1_000));
 
@@ -82,7 +82,7 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	let script_pubkey =
 		receiver.reveal_next_address(KeychainKind::External).address.script_pubkey();
 	let uniform_amount = true;
-	let fee_rate = FeeRate::from_sat_per_vb(DEFAULT_MIN_RELAY_TX_FEE as u64).unwrap();
+	let fee_rate = FeeRate::from_sat_per_vb(50).unwrap();
 	let locktime: LockTime = LockTime::ZERO;
 	let max_utxo_count = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
@@ -90,7 +90,7 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 	let max_hops = 128;
 
 	// Sender must connect to an initial Node
-	nodes[starting_node_idx].connect(&nodes[initial_node_idx])?;
+	connect(&nodes[starting_node_idx], &nodes[initial_node_idx])?;
 	while !nodes[starting_node_idx].is_peer_connected(&nodes[initial_node_idx].node_id()) {
 		sleep(Duration::from_millis(250));
 		println!(
@@ -140,8 +140,6 @@ fn batcher_as_node() -> Result<(), Box<dyn Error>> {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
 		node.stop()?;
 	}
-
-	remove_temp_dir("batcher_as_node")?;
 
 	Ok(())
 }

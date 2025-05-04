@@ -1,17 +1,19 @@
 use crate::batch::process_batch_messages;
 use crate::bitcoind::BitcoindConfig;
 use crate::broker::Broker;
-use crate::config::{BrokerConfig, NodeConfig};
+use crate::config::{BrokerConfig, LoggerConfig, NodeConfig};
 use crate::events::SimpleEventHandler;
-use crate::logger::SimpleLogger;
+use crate::logger::{print_pubkey, SimpleLogger};
 use crate::messages::{BatchMessage, BatchMessageHandler};
 use crate::persister::InMemoryPersister;
+use crate::storage::PeerStorage;
 use crate::types::{ChainMonitor, ChannelManager, FixedFeeEstimator, MockBroadcaster, PeerManager};
 
 use bdk_wallet::{Balance, LocalOutput};
 use bip39::{Language, Mnemonic};
 use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use bitcoin::Txid;
 use bitcoin::{hex::FromHex, Address, Amount, FeeRate, Psbt, ScriptBuf, Transaction};
 use lightning::bitcoin::network::Network;
 use lightning::events::EventsProvider;
@@ -25,7 +27,11 @@ use lightning::routing::scoring::{
 };
 use lightning::sign::KeysManager;
 use lightning::util::config::UserConfig;
+use lightning::util::logger::Level;
+use lightning::util::logger::Logger;
+use lightning::{log_debug, log_error, log_info};
 use lightning_net_tokio::{setup_inbound, setup_outbound};
+
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 
@@ -41,18 +47,20 @@ pub struct Node {
 	alias: String,
 	endpoint: String,
 	pub peer_manager: Arc<PeerManager>,
+	peer_storage: Arc<Mutex<PeerStorage>>,
 	pub channel_manager: Arc<ChannelManager>,
 	pub event_handler: Arc<SimpleEventHandler>,
 	pub custom_message_handler: Arc<BatchMessageHandler>,
 	pub broker: Broker,
+	pub logger: Arc<SimpleLogger>,
 	runtime: Arc<RwLock<Option<Arc<Runtime>>>>,
 }
 
 impl Node {
 	pub fn new(
 		alias: String, secret: &[u8; 32], host: String, port: u16, network: Network,
-		bitcoind_config: BitcoindConfig, wallet_secret: &[u8; 32], db_path: String,
-		broker_config: BrokerConfig,
+		peers_db_path: String, bitcoind_config: BitcoindConfig, wallet_secret: &[u8; 32],
+		wallet_file_path: String, broker_config: BrokerConfig, logger_config: LoggerConfig,
 	) -> Result<Self, Box<dyn Error>> {
 		Self::inner_new(
 			alias,
@@ -60,15 +68,17 @@ impl Node {
 			host,
 			port,
 			network,
+			peers_db_path,
 			bitcoind_config,
 			wallet_secret,
-			db_path,
+			wallet_file_path,
 			broker_config,
+			logger_config,
 		)
 	}
 
 	pub fn new_from_config(config: NodeConfig) -> Result<Self, Box<dyn Error>> {
-		let mnemonic = Mnemonic::parse_in(Language::English, config.mnemonic)?;
+		let mnemonic = Mnemonic::parse_in(Language::English, config.wallet.mnemonic)?;
 		let seed = mnemonic.to_seed("");
 		let wallet_secret: &[u8; 32] = seed[..32].try_into().unwrap();
 
@@ -80,17 +90,19 @@ impl Node {
 			config.host,
 			config.port,
 			config.network,
-			config.bitcoind_config,
+			config.peers_db_path,
+			config.bitcoind,
 			wallet_secret,
-			config.db_path,
-			config.broker_config,
+			config.wallet.file_path,
+			config.broker,
+			config.logger,
 		)
 	}
 
 	fn inner_new(
 		alias: String, secret: &[u8; 32], host: String, port: u16, network: Network,
-		bitcoind_config: BitcoindConfig, wallet_secret: &[u8; 32], db_path: String,
-		broker_config: BrokerConfig,
+		peers_db_path: String, bitcoind_config: BitcoindConfig, wallet_secret: &[u8; 32],
+		wallet_file_path: String, broker_config: BrokerConfig, logger_config: LoggerConfig,
 	) -> Result<Self, Box<dyn Error>> {
 		let secp = Secp256k1::new();
 
@@ -105,8 +117,18 @@ impl Node {
 		let id = keys_manager.get_node_secret_key().public_key(&secp);
 
 		// Step 2: Set up peripheral components
+		let log_max_level = match logger_config.max_level.as_str() {
+			"info" => Level::Info,
+			"warn" => Level::Warn,
+			"debug" => Level::Debug,
+			"trace" => Level::Trace,
+			"gossip" => Level::Gossip,
+			"error" => Level::Error,
+			_ => Level::Info,
+		};
+		let logger = Arc::new(SimpleLogger::new(logger_config.file_path, log_max_level)?);
+
 		let fee_estimator = Arc::new(FixedFeeEstimator { sat_per_kw: 1000 });
-		let logger = Arc::new(SimpleLogger);
 		let broadcaster = Arc::new(MockBroadcaster);
 		let persister = Arc::new(InMemoryPersister { monitors: Mutex::new(HashMap::new()) });
 
@@ -169,8 +191,9 @@ impl Node {
 			network,
 			broker_config,
 			bitcoind_config,
-			db_path,
+			wallet_file_path,
 			custom_message_handler.clone(),
+			logger.clone(),
 		)?;
 
 		let message_handler = MessageHandler {
@@ -188,15 +211,19 @@ impl Node {
 			keys_manager.clone(),
 		));
 
+		let peer_storage = Arc::new(Mutex::new(PeerStorage::new(&peers_db_path)?));
+
 		Ok(Node {
 			id,
 			alias,
 			endpoint: format!("{}:{}", host, port),
 			peer_manager,
+			peer_storage,
 			channel_manager,
 			event_handler: Arc::new(SimpleEventHandler),
 			custom_message_handler,
 			broker,
+			logger,
 			runtime: Default::default(),
 		})
 	}
@@ -223,8 +250,8 @@ impl Node {
 		self.broker.create_multisig(network, other, db_path)
 	}
 
-	pub fn multisig_sync(&self, other: &PublicKey, debug: bool) -> Result<(), Box<dyn Error>> {
-		self.broker.multisig_sync(other, debug)
+	pub fn multisig_sync(&self, other: &PublicKey) -> Result<(), Box<dyn Error>> {
+		self.broker.multisig_sync(other)
 	}
 
 	pub fn start(&self) -> Result<(), Box<dyn Error>> {
@@ -263,8 +290,10 @@ impl Node {
 			}
 		});
 
+		let logger_clone = self.logger.clone();
 		let broker_clone = broker.clone();
 		let pm_clone = peer_manager.clone();
+		let peer_storage = self.peer_storage.clone();
 		let node_alias = self.alias.clone();
 		let node_id = self.id;
 		let node_endpoint = self.endpoint.clone();
@@ -276,15 +305,27 @@ impl Node {
 				let messages: Vec<_> =
 					custom_message_handler.queue.lock().unwrap().drain(..).collect();
 				for (_, msg) in messages {
-					process_batch_messages(
+					match process_batch_messages(
 						&node_alias,
 						&node_id,
 						node_endpoint.clone(),
 						&broker_clone,
 						pm_clone.clone(),
+						peer_storage.clone(),
+						&logger_clone,
 						msg,
-					)
-					.unwrap();
+					) {
+						Ok(_) => {},
+						Err(err) => {
+							log_error!(
+								logger_clone,
+								"[{}][{}] process_batch_messages() {}",
+								node_id,
+								node_alias,
+								err
+							);
+						},
+					}
 				}
 			}
 		});
@@ -293,15 +334,23 @@ impl Node {
 		let node_id = self.id;
 		let node_alias = self.alias.clone();
 		let endpoint = self.endpoint.clone();
+		let logger = self.logger.clone();
 		runtime.spawn(async move {
 			let listener = TcpListener::bind(&endpoint).await.expect("Failed to bind port");
-			println!("[{}][{}] Node listening on {}", node_id, node_alias, endpoint);
+			log_info!(logger, "[{}][{}] Node listening on {}", node_id, node_alias, endpoint);
 			loop {
 				let node_alias = node_alias.clone();
+				let logger = logger.clone();
 				let peer_manager = peer_manager.clone();
 				match listener.accept().await {
 					Ok((stream, addr)) => {
-						println!("[{}][{}] New connection from {}", node_id, node_alias, addr);
+						log_info!(
+							logger,
+							"[{}][{}] New connection from {}",
+							node_id,
+							node_alias,
+							addr
+						);
 						// Spawn a task to handle this connection
 						tokio::spawn(async move {
 							match stream.into_std() {
@@ -309,27 +358,91 @@ impl Node {
 									setup_inbound(peer_manager.clone(), std_stream).await;
 								},
 								Err(e) => {
-									eprintln!(
+									log_error!(
+										logger,
 										"[{}][{}] Failed to convert tokio stream to std: {}",
-										node_id, node_alias, e
+										node_id,
+										node_alias,
+										e
 									);
 								},
 							}
 						});
 					},
 					Err(e) => {
-						eprintln!("[{}][{}] Connection failed: {}", node_id, node_alias, e);
+						log_error!(
+							logger,
+							"[{}][{}] Connection failed: {}",
+							node_id,
+							node_alias,
+							e
+						);
 					},
 				}
 			}
 		});
 
-		for (pubkey, ep) in self.broker.config.bootnodes.clone() {
+		let mut peers_in_memory: HashMap<PublicKey, String> = Default::default();
+
+		// Reconnect from PeerStorage list
+		let peer_storage = self.peer_storage.lock().unwrap();
+		for (pubkey, ep) in peer_storage.list_peers()? {
 			if !self.is_peer_connected(&pubkey) {
-				println!("[{}][{}] Bootnode connecting -> {}@{}", self.id, self.alias, pubkey, ep);
-				self._connect(&runtime, (pubkey, ep))?;
+				log_info!(
+					self.logger,
+					"[{}][{}] PeerStorage reconnecting {}@{}",
+					self.id,
+					self.alias,
+					pubkey,
+					ep
+				);
+				self._connect(&runtime, pubkey, ep.clone(), false)?;
+				peers_in_memory.insert(pubkey, ep);
 			}
 		}
+
+		// Reconnect from config.toml bootnodes list
+		for (pubkey, ep) in self.broker.config.bootnodes.clone() {
+			if !self.is_peer_connected(&pubkey) {
+				log_info!(
+					self.logger,
+					"[{}][{}] Bootnode connecting -> {}@{}",
+					self.id,
+					self.alias,
+					pubkey,
+					ep
+				);
+				self._connect(&runtime, pubkey, ep.clone(), true)?;
+				peers_in_memory.insert(pubkey, ep);
+			}
+		}
+
+		// Wallet sync
+		let node_id = self.id;
+		let node_alias = self.alias.clone();
+		let broker_clone = broker.clone();
+		let wallet_sync_interval = broker.config.wallet_sync_interval;
+		let logger = self.logger.clone();
+		runtime.spawn(async move {
+			let mut interval = time::interval(Duration::from_secs(wallet_sync_interval as u64));
+			loop {
+				interval.tick().await;
+				broker_clone.sync_wallet().unwrap();
+				let utxos = broker_clone.list_unspent().unwrap_or_default();
+				let mut value = Amount::ZERO;
+				for utxo in &utxos {
+					value += utxo.txout.value;
+				}
+				log_debug!(
+					logger,
+					"[{}][{}] Synching wallet -> utxos={} | value={}",
+					node_id,
+					node_alias,
+					utxos.len(),
+					value
+				);
+			}
+		});
 
 		*runtime_lock = Some(runtime);
 
@@ -353,25 +466,78 @@ impl Node {
 		self.peer_manager.peer_by_node_id(their_node_id).is_some()
 	}
 
-	pub fn connect(&self, other: &Node) -> Result<(), Box<dyn Error>> {
+	pub fn connect(
+		&self, other_id: PublicKey, other_endpoint: String,
+	) -> Result<(), Box<dyn Error>> {
 		let runtime_lock = self.runtime.read().unwrap();
-		if let Some(runtime) = runtime_lock.as_ref() {
-			return self._connect(runtime, (other.node_id(), other.endpoint()));
-		}
-		Err("Connect has failed!".into())
+		let runtime = runtime_lock.as_ref().unwrap();
+		self._connect(runtime, other_id, other_endpoint, true)?;
+		Ok(())
 	}
 
 	fn _connect(
-		&self, runtime: &Arc<Runtime>, other: (PublicKey, String),
+		&self, runtime: &Arc<Runtime>, other_id: PublicKey, other_endpoint: String, persist: bool,
 	) -> Result<(), Box<dyn Error>> {
-		let other_id = other.0;
-		let other_endpoint = other.1;
+		let node_id = self.node_id();
+		let node_alias = self.alias();
+		let logger = self.logger.clone();
+		let peer_storage = self.peer_storage.clone();
 		let peer_manager = self.peer_manager.clone();
 		runtime.spawn(async move {
-			let stream = TcpStream::connect(&other_endpoint).await.expect("Failed to connect");
-			match stream.into_std() {
-				Ok(std_stream) => setup_outbound(peer_manager.clone(), other_id, std_stream).await,
-				Err(e) => eprintln!("❌ Failed to convert stream: {e}"),
+			match TcpStream::connect(&other_endpoint).await {
+				Ok(stream) => match stream.into_std() {
+					Ok(std_stream) => {
+						if persist {
+							let result = {
+								let storage = peer_storage.lock().unwrap();
+								storage.upsert_peer(&other_id, other_endpoint.clone())
+							};
+							match result {
+								Ok(_) => {
+									log_info!(
+										logger,
+										"[{}][{}] PeerStorage connecting {}@{}",
+										node_id,
+										node_alias,
+										other_id,
+										other_endpoint
+									);
+								},
+								Err(err) => {
+									log_error!(
+										logger,
+										"[{}][{}][ERROR] PeerStorage failed: {}@{} | {}",
+										node_id,
+										node_alias,
+										other_id,
+										other_endpoint,
+										err
+									);
+								},
+							}
+							drop(peer_storage);
+						}
+						setup_outbound(peer_manager.clone(), other_id, std_stream).await
+					},
+					Err(e) => {
+						log_error!(
+							logger,
+							"[{}][{}][ERROR] Failed to convert stream: {e}",
+							node_id,
+							node_alias
+						);
+					},
+				},
+				Err(_) => {
+					log_error!(
+						logger,
+						"[{}][{}][ERROR] Failed to connect to peer {} @ {}",
+						node_id,
+						node_alias,
+						other_id,
+						other_endpoint
+					);
+				},
 			}
 		});
 		Ok(())
@@ -388,9 +554,18 @@ impl Node {
 		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
 		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
 	) -> Result<(), Box<dyn Error>> {
-		self.peer_manager
-			.peer_by_node_id(&their_node_id)
-			.ok_or(format!("[{}] Peer not connected: {}", self.id, their_node_id))?;
+		match self.peer_manager.peer_by_node_id(&their_node_id) {
+			Some(_) => {},
+			None => {
+				log_error!(
+					self.logger,
+					"[{}][{}] Peer not connected: {}",
+					self.id,
+					self.alias,
+					their_node_id
+				)
+			},
+		}
 
 		let mut psbt = self.build_psbt(output_script, amount, fee_rate, locktime)?;
 
@@ -401,6 +576,22 @@ impl Node {
 
 		let fee_per_participant = fee_per_participant.to_sat();
 		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
+
+		let psbt_bytes = psbt.serialize();
+
+		log_info!(
+			self.logger,
+			"[{}][{}] Initializing BatchPsbt: next={} | uamt={} | fee={} | utxos={} | max_p={} | max_hops={} | len={}",
+			self.node_id(),
+			self.alias(),
+			print_pubkey(&their_node_id),
+			uniform_amount,
+			fee_per_participant,
+			max_utxo_per_participant,
+			max_participants,
+			max_hops,
+			psbt_bytes.len(),
+		);
 
 		let batch_psbt = BatchMessage::BatchPsbt {
 			sender_node_id: self.node_id(),
@@ -414,7 +605,7 @@ impl Node {
 			endpoints: vec![self.endpoint()],
 			not_participants: vec![],
 			hops: 0,
-			psbt: psbt.serialize(),
+			psbt: psbt_bytes,
 			sign: false,
 		};
 
@@ -479,48 +670,8 @@ impl Node {
 		Ok(())
 	}
 
-	fn _psbt_batch(
-		&self, their_node_id: PublicKey, output_script: ScriptBuf, amount: Amount,
-		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
-		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
-	) -> Result<(), Box<dyn Error>> {
-		self.peer_manager
-			.peer_by_node_id(&their_node_id)
-			.ok_or(format!("[{}] Peer not connected: {}", self.id, their_node_id))?;
-
-		let mut psbt = self.build_psbt(output_script, amount, fee_rate, locktime)?;
-
-		// Initiator must cover all the batch fees
-		let total_fee = fee_per_participant * (max_participants as u64);
-
-		self.add_utxos_to_psbt(&mut psbt, max_utxo_per_participant + 1, None, total_fee, true)?;
-
-		let fee_per_participant = fee_per_participant.to_sat();
-		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
-
-		let batch_psbt = BatchMessage::BatchPsbt {
-			sender_node_id: self.node_id(),
-			receiver_node_id: their_node_id,
-			uniform_amount,
-			fee_per_participant,
-			max_utxo_per_participant,
-			max_participants: max_participants + 1,
-			max_hops,
-			participants: vec![self.node_id()],
-			endpoints: vec![self.endpoint()],
-			not_participants: vec![],
-			hops: 0,
-			psbt: psbt.serialize(),
-			sign: false,
-		};
-
-		self.broker.send(their_node_id, batch_psbt)?;
-
-		Ok(())
-	}
-
-	pub fn sync_wallet(&self, debug: bool) -> Result<(), Box<dyn Error>> {
-		self.broker.sync_wallet(debug)
+	pub fn sync_wallet(&self) -> Result<(), Box<dyn Error>> {
+		self.broker.sync_wallet()
 	}
 
 	pub fn balance(&self) -> Balance {
@@ -563,8 +714,8 @@ impl Node {
 		self.broker.multisig_sign_psbt(other, psbt)
 	}
 
-	pub fn broadcast_transactions(&self, txs: &[&Transaction]) -> Result<(), Box<dyn Error>> {
-		self.broker.broadcast_transactions(txs)
+	pub fn broadcast_transactions(&self, tx: &Transaction) -> Result<Txid, Box<dyn Error>> {
+		self.broker.broadcast_transaction(tx)
 	}
 
 	pub fn build_foreign_psbt(

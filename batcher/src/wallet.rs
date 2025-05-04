@@ -40,13 +40,10 @@ pub fn create_sender_multisig(
 }
 
 pub fn sync_wallet(
-	bitcoind_client: &Client, wallet: &mut PersistedWallet, debug: bool,
+	bitcoind_client: &Client, wallet: &mut PersistedWallet,
 ) -> Result<(), Box<dyn Error>> {
 	let latest = bitcoind_client.get_block_count()?;
 	let stored = wallet.latest_checkpoint().block_id().height as u64;
-	if debug {
-		println!("    -> WalletSyncBlock: (stored={} | latest={})", stored, latest);
-	}
 	for height in stored..latest {
 		let hash = bitcoind_client.get_block_hash(height)?;
 		let block = bitcoind_client.get_block(&hash)?;
@@ -58,7 +55,7 @@ pub fn sync_wallet(
 pub fn wallet_total_balance(
 	bitcoind_client: &Client, wallet: &mut PersistedWallet,
 ) -> Result<Amount, Box<dyn Error>> {
-	sync_wallet(bitcoind_client, wallet, false)?;
+	sync_wallet(bitcoind_client, wallet)?;
 	let balance = wallet.balance();
 	Ok(balance.total())
 }

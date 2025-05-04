@@ -4,32 +4,32 @@ use std::{error::Error, sync::Arc};
 
 use batcher::{
 	bitcoind::{fund_address, setup_bitcoind, wait_for_block},
-	config::{BrokerConfig, NodeConfig},
+	config::{BrokerConfig, LoggerConfig, NodeConfig, WalletConfig},
 	node::Node,
 	wallet::create_wallet,
 };
 
 use bdk_wallet::KeychainKind;
-use bitcoin::{
-	absolute::LockTime, policy::DEFAULT_MIN_RELAY_TX_FEE, Amount, FeeRate, Network, Psbt,
-};
-use common::{broadcast_tx, create_temp_dir, remove_temp_dir, setup_nodes};
+use bitcoin::{absolute::LockTime, Amount, FeeRate, Network, Psbt};
+use common::{broadcast_tx, create_temp_dir, setup_nodes};
 
 #[test]
-fn node_from_config() -> Result<(), Box<dyn Error>> {
+fn batcher_from_config() -> Result<(), Box<dyn Error>> {
 	let network = Network::Regtest;
 
 	let bitcoind = setup_bitcoind()?;
 
-	let temp_dir = create_temp_dir("node_from_config")?;
+	let temp_dir = create_temp_dir("batcher_from_config")?;
 
-	let mut config = NodeConfig::new("config.toml")?;
-	config.bitcoind_config.rpc_address = bitcoind.rpc_url();
-	config.db_path = format!("{}/wallet_from_config.db", temp_dir.display());
+	let mut config = NodeConfig::new("config.example.toml")?;
+	config.bitcoind.rpc_address = bitcoind.rpc_url();
+	config.wallet.file_path = format!("{}/wallet_from_config.db", temp_dir.display());
+	config.peers_db_path = format!("{}/peers_from_config.db", temp_dir.display());
+	config.logger.file_path = format!("{}/logger_from_config.db", temp_dir.display());
 
-	let bitcoind_config = config.bitcoind_config.clone();
+	let bitcoind_config = config.bitcoind.clone();
 
-	let broker_config = BrokerConfig::new(vec![], 25_000, 2);
+	let broker_config = BrokerConfig::new(vec![], 25_000, 2, 60);
 	let mut others = setup_nodes(3, 7777, network, bitcoind_config.clone(), broker_config)?;
 
 	// Node that does not participate
@@ -39,10 +39,18 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 		host: "0.0.0.0".to_string(),
 		port: 7071,
 		network,
-		mnemonic: "egg glad reflect finish crash veteran tiny dance blouse garlic stock solution"
-			.to_string(),
-		db_path: format!("{}/wallet_np.db", temp_dir.display()),
-		broker_config: BrokerConfig {
+		peers_db_path: format!("{}/peers_np.db", temp_dir.display()),
+		wallet: WalletConfig {
+			mnemonic:
+				"egg glad reflect finish crash veteran tiny dance blouse garlic stock solution"
+					.to_string(),
+			file_path: format!("{}/wallet_np.db", temp_dir.display()),
+		},
+		logger: LoggerConfig::new(
+			format!("{}/logger_from_config.log", temp_dir.display()),
+			"trace".to_string(),
+		),
+		broker: BrokerConfig {
 			bootnodes: vec![
 				// Node[0]
 				(others[0].node_id(), others[0].endpoint()),
@@ -53,8 +61,9 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 			],
 			minimum_fee: 1_000_000,
 			max_utxo_count: 1,
+			wallet_sync_interval: 60,
 		},
-		bitcoind_config: bitcoind_config.clone(),
+		bitcoind: bitcoind_config.clone(),
 	};
 	let np_node = Arc::new(Node::new_from_config(np_config)?);
 	np_node.start()?;
@@ -77,9 +86,9 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 	//          \
 	//            N2
 
-	node.sync_wallet(true)?;
+	node.sync_wallet()?;
 	for node in &others {
-		node.sync_wallet(false)?;
+		node.sync_wallet()?;
 	}
 
 	// Starting Batch workflow
@@ -90,7 +99,7 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 	let script_pubkey =
 		receiver.reveal_next_address(KeychainKind::External).address.script_pubkey();
 	let uniform_amount = true;
-	let fee_rate = FeeRate::from_sat_per_vb(DEFAULT_MIN_RELAY_TX_FEE as u64).unwrap();
+	let fee_rate = FeeRate::from_sat_per_vb(50).unwrap();
 	let locktime: LockTime = LockTime::ZERO;
 	let max_utxo_per_participant = 4;
 	let fee_per_participant = Amount::from_sat(99_999);
@@ -117,9 +126,9 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 	// Foreign workflow
 	println!("\n----- Foreign workflow -----\n");
 
-	node.sync_wallet(false)?;
+	node.sync_wallet()?;
 	for node in &others {
-		node.sync_wallet(false)?;
+		node.sync_wallet()?;
 	}
 
 	let script_pubkey =
@@ -158,8 +167,6 @@ fn node_from_config() -> Result<(), Box<dyn Error>> {
 		println!("[{}][{}] Stopping...", node.node_id(), node.alias());
 		node.stop()?;
 	}
-
-	remove_temp_dir("node_from_config")?;
 
 	Ok(())
 }

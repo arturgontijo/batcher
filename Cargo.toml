@@ -1,12 +1,18 @@
-[package]
-name = "batcher"
-version = "0.0.9"
+[workspace.package]
+homepage = "https://arturgontijo.github.io/batcher"
+repository = "https://github.com/arturgontijo/batcher.git"
+authors = ["Artur Gontijo <arturgontijo@lol>"]
 edition = "2021"
 
-[lib]
-name = "batcher"
+[workspace]
+resolver = "2"
 
-[dependencies]
+members = [
+	"batcher",
+	"cli",
+]
+
+[workspace.dependencies]
 tokio = { version = "1.0", features = ["full"] }
 rand = "0.8"
 
@@ -21,3 +27,10 @@ bip39 = "2.1.0"
 serde = "1.0.219"
 toml = { version ="0.8.21", features = ["parse"] }
 bitcoind = "0.36.1"
+
+chrono = { version = "0.4", features = ["clock"] }
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = true
