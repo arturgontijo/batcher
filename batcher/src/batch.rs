@@ -6,8 +6,8 @@ use std::time::Duration;
 use bitcoin::psbt::{Input, Output};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, Psbt, TxIn, TxOut};
-use lightning::log_info;
 use lightning::util::logger::Logger;
+use lightning::{log_debug, log_info};
 use lightning_net_tokio::setup_outbound;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -24,6 +24,7 @@ pub(crate) fn process_batch_messages(
 	peer_manager: Arc<PeerManager>, peer_storage: Arc<Mutex<PeerStorage>>, logger: &SimpleLogger,
 	msg: BatchMessage,
 ) -> Result<(), Box<dyn Error>> {
+	log_debug!(logger, "{:?}", msg);
 	if let BatchMessage::BatchPsbt {
 		sender_node_id,
 		receiver_node_id: _,

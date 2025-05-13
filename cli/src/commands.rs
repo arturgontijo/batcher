@@ -1,6 +1,8 @@
-use batcher::{config::NodeConfig, node::Node};
-use bitcoin::{absolute::LockTime, secp256k1::PublicKey, Amount, FeeRate, Psbt, ScriptBuf};
-use bitcoincore_rpc::RpcApi;
+use batcher::{bitcoind::bitcoind_client, config::NodeConfig, node::Node};
+use bitcoin::{
+	absolute::LockTime, secp256k1::PublicKey, Address, Amount, FeeRate, Psbt, ScriptBuf,
+};
+use bitcoincore_rpc::{Client, RpcApi};
 use std::{
 	error::Error,
 	sync::{Arc, RwLock},
@@ -11,7 +13,7 @@ use std::{
 use std::str::FromStr;
 
 pub fn handle_command(
-	input: &str, node: &Arc<RwLock<Option<Arc<Node>>>>,
+	input: &str, node: &Arc<RwLock<Option<Arc<Node>>>>, client: &Arc<RwLock<Option<Arc<Client>>>>,
 ) -> Result<(), Box<dyn Error>> {
 	let mut parts = input.split_whitespace();
 	let cmd = match parts.next() {
@@ -97,9 +99,18 @@ pub fn handle_command(
 						node.connect(pubkey, address.to_string())?;
 						let mut checks = 0;
 						while !node.is_peer_connected(&pubkey) {
-							sleep(Duration::from_millis(100));
+							sleep(Duration::from_millis(300));
 							checks += 1;
-							if checks >= 5 {
+							if checks == 50 || checks == 100 {
+								println!(
+									"[{}][{}] Connection is taking too long ({} @ {})",
+									node.node_id(),
+									node.alias(),
+									node_id,
+									address
+								);
+							}
+							if checks >= 200 {
 								break;
 							}
 						}
@@ -217,6 +228,82 @@ pub fn handle_command(
 				}
 			} else {
 				println!("Node is not running.");
+			}
+			Ok(())
+		},
+		"client" | "cs" => {
+			let rpc_address = parts.next();
+			let rpc_user = parts.next();
+			let rpc_pass = parts.next();
+			let wallet = parts.next();
+			let mut unlocked = client.write().unwrap();
+			if unlocked.is_some() {
+				println!("Client is already set up.");
+			} else {
+				match (rpc_address, rpc_user, rpc_pass, wallet) {
+					(Some(rpc_address), Some(rpc_user), Some(rpc_pass), Some(wallet)) => {
+						let _client = bitcoind_client(
+							rpc_address.to_string(),
+							rpc_user.to_string(),
+							rpc_pass.to_string(),
+							Some(wallet),
+						)?;
+						*unlocked = Some(Arc::new(_client));
+						println!("Client is set up.");
+					},
+					_ => {
+						println!("Usage: client <RPC_ADDR> <USER> <PASS> <WALLET>");
+					},
+				}
+			}
+			Ok(())
+		},
+		"fund" | "f" => {
+			let unlocked = client.read().unwrap();
+			if let Some(client) = unlocked.clone() {
+				let address = parts.next();
+				let amount = parts.next();
+				match (address, amount) {
+					(Some(address), Some(amount)) => {
+						let amt = Amount::from_btc(amount.parse()?)?;
+						client.send_to_address(
+							&Address::from_str(address)?.assume_checked(),
+							amt,
+							None,
+							None,
+							None,
+							None,
+							None,
+							None,
+						)?;
+						println!("Client sent {} to {}.", amt, address);
+					},
+					_ => {
+						println!("Usage: fund <ADDR> <AMOUNT_BTC>");
+					},
+				}
+			} else {
+				println!("Client is not running.");
+			}
+			Ok(())
+		},
+		"mine" | "m" => {
+			let unlocked = client.read().unwrap();
+			if let Some(client) = unlocked.clone() {
+				let block_num = parts.next();
+				match block_num {
+					Some(block_num) => {
+						let block_num: u64 = block_num.parse()?;
+						let address = client.get_new_address(None, None)?.assume_checked();
+						client.generate_to_address(block_num, &address)?;
+						println!("Client mined {} block to {}.", block_num, address);
+					},
+					_ => {
+						println!("Usage: mine <BLOCK_NUM>");
+					},
+				}
+			} else {
+				println!("Client is not running.");
 			}
 			Ok(())
 		},

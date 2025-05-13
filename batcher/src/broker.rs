@@ -21,8 +21,8 @@ use bitcoin::{
 };
 use bitcoincore_rpc::{Client, RpcApi};
 
-use lightning::log_info;
 use lightning::util::logger::Logger;
+use lightning::{log_debug, log_info};
 
 use crate::{
 	bitcoind::{bitcoind_client, BitcoindConfig},
@@ -456,6 +456,14 @@ impl Broker {
 	}
 
 	pub fn send(&self, their_node_id: PublicKey, msg: BatchMessage) -> Result<(), Box<dyn Error>> {
+		log_debug!(
+			self.logger,
+			"[{}][{}] Sending: to={} | {:?}",
+			self.node_id,
+			self.node_alias,
+			their_node_id,
+			msg,
+		);
 		self.custom_message_handler.send(their_node_id, msg);
 		Ok(())
 	}

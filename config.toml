@@ -1,0 +1,34 @@
+# Node
+alias = "test"
+secret = "7777777777777777777777777777777777777777777777777777777777777777"
+
+host = "0.0.0.0"
+port = 7070
+
+network = "signet"
+
+peers_db_path = "/tmp/batcher_peers.db"
+
+# Wallet
+[wallet]
+mnemonic = "round scout spy surround milk sand abuse joy desert lunar toddler craft"
+file_path = "/tmp/batcher_wallet.db"
+
+# Broker
+[broker]
+# Initial nodes to connect to (eg. [(pubkey, endpoint)])
+bootnodes = []
+minimum_fee = 10_000
+max_utxo_count = 2
+wallet_sync_interval = 60
+
+# Logger
+[logger]
+file_path = "/tmp/batcher_logger.log"
+max_level = "info"
+
+# Bitcoind
+[bitcoind]
+rpc_address = "45.55.147.2:38332"
+rpc_user = "bitcoind"
+rpc_pass = "bitcoind"

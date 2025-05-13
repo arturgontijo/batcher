@@ -43,7 +43,10 @@ pub fn sync_wallet(
 	bitcoind_client: &Client, wallet: &mut PersistedWallet,
 ) -> Result<(), Box<dyn Error>> {
 	let latest = bitcoind_client.get_block_count()?;
-	let stored = wallet.latest_checkpoint().block_id().height as u64;
+	let mut stored = wallet.latest_checkpoint().block_id().height as u64;
+	if stored == 0 {
+		stored = 1
+	}
 	for height in stored..latest {
 		let hash = bitcoind_client.get_block_hash(height)?;
 		let block = bitcoind_client.get_block(&hash)?;
