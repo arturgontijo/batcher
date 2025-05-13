@@ -1,7 +1,5 @@
 use batcher::{bitcoind::bitcoind_client, config::NodeConfig, node::Node};
-use bitcoin::{
-	absolute::LockTime, secp256k1::PublicKey, Address, Amount, FeeRate, Psbt, ScriptBuf,
-};
+use bitcoin::{absolute::LockTime, secp256k1::PublicKey, Address, Amount, FeeRate, Psbt};
 use bitcoincore_rpc::{Client, RpcApi};
 use std::{
 	error::Error,
@@ -151,9 +149,9 @@ pub fn handle_command(
 			}
 			Ok(())
 		},
-		// b 0014ccf585117d810bc3ad692ae28b8bfc87df6e0075 777777 99999
+		// b tb1qw6w293n3pxnydktdlsngtjfcek4stsl5tfyvcm 777777 99999
 		"batch" | "b" => {
-			let output_script = parts.next();
+			let addr_str = parts.next();
 			let amount = parts.next();
 			let fee_per_participant = parts.next();
 			let max_participants = parts.next().unwrap_or("2");
@@ -161,13 +159,15 @@ pub fn handle_command(
 			let max_hops = parts.next().unwrap_or("255");
 			let unlocked = node.read().unwrap();
 			if let Some(node) = unlocked.clone() {
-				match (output_script, amount, fee_per_participant) {
-					(Some(output_script), Some(amount), Some(fee_per_participant)) => {
+				match (addr_str, amount, fee_per_participant) {
+					(Some(addr_str), Some(amount), Some(fee_per_participant)) => {
 						match node.peer_manager.list_peers().first() {
 							Some(pd) => {
+								let address = Address::from_str(addr_str)?.assume_checked();
+								let output_script = address.script_pubkey();
 								node.init_psbt_batch(
 									pd.counterparty_node_id,
-									ScriptBuf::from_hex(output_script).unwrap(),
+									output_script,
 									Amount::from_sat(amount.parse()?),
 									FeeRate::from_sat_per_vb_unchecked(50),
 									LockTime::ZERO,
