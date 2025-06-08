@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
@@ -17,13 +16,13 @@ use crate::broker::Broker;
 use crate::logger::{print_pubkey, SimpleLogger};
 use crate::messages::BatchMessage;
 use crate::storage::PeerStorage;
-use crate::types::PeerManager;
+use crate::types::{BoxError, PeerManager};
 
 pub(crate) fn process_batch_messages(
 	node_alias: &String, node_id: &PublicKey, node_endpoint: String, broker: &Broker,
 	peer_manager: Arc<PeerManager>, peer_storage: Arc<Mutex<PeerStorage>>, logger: &SimpleLogger,
 	msg: BatchMessage,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
 	log_debug!(logger, "{:?}", msg);
 	if let BatchMessage::BatchPsbt {
 		sender_node_id,
@@ -96,7 +95,7 @@ pub(crate) fn process_batch_messages(
 				hops,
 				max_hops
 			);
-			return broker.send(last_participant_id, msg);
+			return broker.send(&last_participant_id, msg);
 		}
 
 		let mut psbt = Psbt::deserialize(&psbt).unwrap();
@@ -222,7 +221,7 @@ pub(crate) fn process_batch_messages(
 				sign: false,
 			};
 
-			broker.send(next_node_id, msg)?;
+			broker.send(&next_node_id, msg)?;
 		} else {
 			// Check if we need to sign or just route the PSBT to someone else
 			if participants.contains(node_id) {
@@ -260,7 +259,7 @@ pub(crate) fn process_batch_messages(
 						psbt,
 						sign: true,
 					};
-					broker.send(next_signer_node_id, msg)?;
+					broker.send(&next_signer_node_id, msg)?;
 				} else {
 					log_info!(
 						logger,
@@ -281,6 +280,18 @@ pub(crate) fn process_batch_messages(
 				broker.push_to_batch_psbts(psbt).unwrap();
 			}
 		}
+	} else if let BatchMessage::Announcement { sender_node_id, receiver_node_id, endpoint } = msg {
+		log_info!(
+			logger,
+			"[{}][{}] Announcement: snd={} | rcv={} | ep={}",
+			node_id,
+			node_alias,
+			print_pubkey(&sender_node_id),
+			print_pubkey(&receiver_node_id),
+			endpoint,
+		);
+		let storage = peer_storage.lock().unwrap();
+		storage.upsert_peer(&sender_node_id, endpoint).unwrap();
 	}
 	Ok(())
 }
@@ -288,7 +299,7 @@ pub(crate) fn process_batch_messages(
 fn connect_peer(
 	peer_manager: Arc<PeerManager>, peer_storage: Arc<Mutex<PeerStorage>>,
 	other_node_id: PublicKey, other_endpoint: String,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
 	let mut counter = 0;
 	// Wait for handshake to finish
 	while peer_manager.peer_by_node_id(&other_node_id).is_none() {

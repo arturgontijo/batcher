@@ -5,7 +5,7 @@ secret = "7777777777777777777777777777777777777777777777777777777777777777"
 host = "0.0.0.0"
 port = 7070
 
-network = "signet"
+network = "regtest"
 
 peers_db_path = "/tmp/batcher_peers.db"
 
@@ -29,6 +29,6 @@ max_level = "info"
 
 # Bitcoind
 [bitcoind]
-rpc_address = "45.55.147.2:38332"
-rpc_user = "bitcoind"
-rpc_pass = "bitcoind"
+rpc_address = "0.0.0.0:18443"
+rpc_user = "local"
+rpc_pass = "local"

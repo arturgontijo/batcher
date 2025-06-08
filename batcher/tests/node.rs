@@ -4,6 +4,7 @@ use batcher::bitcoind::BitcoindConfig;
 use batcher::bitcoind::{self, setup_bitcoind};
 use batcher::config::BrokerConfig;
 use batcher::node::Node;
+use batcher::types::BoxError;
 use batcher::wallet;
 
 use bdk_wallet::KeychainKind;
@@ -14,14 +15,13 @@ use bitcoind::{fund_address, wait_for_block};
 use common::{broadcast_tx, connect, create_temp_dir, setup_nodes};
 use wallet::create_wallet;
 
-use std::error::Error;
 use std::sync::Arc;
 use std::thread::sleep;
 use tokio::time::Duration;
 
 fn setup_network(
 	client: &Client, network: Network, bitcoind_config: BitcoindConfig,
-) -> Result<Vec<Arc<Node>>, Box<dyn Error>> {
+) -> Result<Vec<Arc<Node>>, BoxError> {
 	let broker_config = BrokerConfig::new(vec![], 25_000, 2, 60);
 	let nodes = setup_nodes(8, 7777, network, bitcoind_config.clone(), broker_config)?;
 
@@ -58,7 +58,7 @@ fn setup_network(
 }
 
 #[test]
-fn batcher_as_node() -> Result<(), Box<dyn Error>> {
+fn batcher_as_node() -> Result<(), BoxError> {
 	let network = Network::Regtest;
 
 	let bitcoind = setup_bitcoind()?;

@@ -1,8 +1,8 @@
-use batcher::{bitcoind::bitcoind_client, config::NodeConfig, node::Node};
+use batcher::{bitcoind::bitcoind_client, config::NodeConfig, node::Node, types::BoxError};
 use bitcoin::{absolute::LockTime, secp256k1::PublicKey, Address, Amount, FeeRate, Psbt};
 use bitcoincore_rpc::{Client, RpcApi};
+use chrono::{DateTime, Utc};
 use std::{
-	error::Error,
 	sync::{Arc, RwLock},
 	thread::sleep,
 	time::Duration,
@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 pub fn handle_command(
 	input: &str, node: &Arc<RwLock<Option<Arc<Node>>>>, client: &Arc<RwLock<Option<Arc<Client>>>>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
 	let mut parts = input.split_whitespace();
 	let cmd = match parts.next() {
 		Some(c) => c,
@@ -67,17 +67,23 @@ pub fn handle_command(
 		"peers" | "lp" => {
 			let unlocked = node.read().unwrap();
 			if let Some(node) = unlocked.clone() {
-				let peers = node.peer_manager.list_peers();
-				if peers.is_empty() {
+				let peers_info = node.list_peers()?;
+				if peers_info.is_empty() {
 					println!("[{}][{}] No connected peers!", node.node_id(), node.alias());
 				} else {
-					for peer in peers {
+					for peer in peers_info {
 						println!(
-							"[{}][{}] Peer: ({}, {})",
+							"[{}][{}] ({}, {}) | {} | {}",
 							node.node_id(),
 							node.alias(),
-							peer.counterparty_node_id,
-							peer.socket_address.unwrap(),
+							peer.0,
+							peer.1,
+							if node.is_peer_connected(&peer.0) {
+								"CONNECTED"
+							} else {
+								"DISCONNECTED"
+							},
+							format_timestamp(peer.2),
 						);
 					}
 				}
@@ -308,7 +314,7 @@ pub fn handle_command(
 			Ok(())
 		},
 		"help" | "h" => {
-			print_help();
+			print_subcommands_help();
 			Ok(())
 		},
 
@@ -320,7 +326,7 @@ pub fn handle_command(
 	}
 }
 
-pub fn print_help() {
+pub fn print_subcommands_help() {
 	println!("\nBatcher CLI:");
 	println!("  start                                                           - Start a Node");
 	println!(
@@ -334,4 +340,9 @@ pub fn print_help() {
 	println!("  bc | broadcast                                                  - Broadcast a Tx from a BatchPsbt");
 	println!("  h  | help                                                       - Show this help message");
 	println!("  q  | exit | quit                                                - Exit the node\n");
+}
+
+fn format_timestamp(timestamp: u64) -> String {
+	let datetime = DateTime::<Utc>::from_timestamp(timestamp as i64, 0).expect("Invalid timestamp");
+	datetime.format("%m/%d/%Y %H:%M:%S").to_string()
 }

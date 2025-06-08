@@ -1,9 +1,9 @@
-use std::{error::Error, fs};
+use std::fs;
 
 use bitcoin::{secp256k1::PublicKey, Network};
 use serde::{Deserialize, Serialize};
 
-use crate::bitcoind::BitcoindConfig;
+use crate::{bitcoind::BitcoindConfig, types::BoxError};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NodeConfig {
@@ -20,7 +20,7 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
-	pub fn new(file_path: &str) -> Result<Self, Box<dyn Error>> {
+	pub fn new(file_path: &str) -> Result<Self, BoxError> {
 		let file_contents = fs::read_to_string(file_path)?;
 		let config: NodeConfig = toml::from_str(&file_contents)?;
 		Ok(config)

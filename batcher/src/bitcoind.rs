@@ -1,10 +1,12 @@
-use std::{env, error::Error};
+use std::env;
 
 use bitcoin::{Address, Amount};
 use bitcoincore_rpc::{json::AddressType, Auth, Client, RpcApi};
 use bitcoind::BitcoinD;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
+
+use crate::types::BoxError;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BitcoindConfig {
@@ -37,7 +39,7 @@ pub fn bitcoind_client(
 
 pub fn fund_address(
 	client: &Client, address: Address, amount: Amount, utxos: u16,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
 	let _ = client.load_wallet("miner");
 	let mut rng = thread_rng();
 	for _ in 0..utxos {
@@ -60,7 +62,7 @@ pub fn fund_address(
 	Ok(())
 }
 
-pub fn setup_bitcoind() -> Result<BitcoinD, Box<dyn Error>> {
+pub fn setup_bitcoind() -> Result<BitcoinD, BoxError> {
 	let bitcoind_exe = env::var("BITCOIND_EXE")
 		.ok()
 		.or_else(|| bitcoind::downloaded_exe_path().ok())
@@ -74,7 +76,7 @@ pub fn setup_bitcoind() -> Result<BitcoinD, Box<dyn Error>> {
 	Ok(bitcoind)
 }
 
-pub fn wait_for_block(client: &Client, blocks: u64) -> Result<(), Box<dyn Error>> {
+pub fn wait_for_block(client: &Client, blocks: u64) -> Result<(), BoxError> {
 	let _ = client.load_wallet("miner");
 	let address = client
 		.get_new_address(Some("miner"), Some(AddressType::Legacy))

@@ -3,6 +3,7 @@ mod common;
 use batcher::bitcoind::BitcoindConfig;
 use batcher::bitcoind::{self, setup_bitcoind};
 use batcher::config::BrokerConfig;
+use batcher::types::BoxError;
 use batcher::wallet;
 
 use bdk_wallet::KeychainKind;
@@ -18,13 +19,12 @@ use bitcoind::{fund_address, wait_for_block};
 use common::{broadcast_tx, connect, create_temp_dir, setup_nodes};
 use wallet::{create_sender_multisig, create_wallet, wallet_total_balance};
 
-use std::error::Error;
 use std::thread::sleep;
 use std::u8;
 use tokio::time::Duration;
 
 #[test]
-fn batcher_as_multisig() -> Result<(), Box<dyn Error>> {
+fn batcher_as_multisig() -> Result<(), BoxError> {
 	let network = Network::Regtest;
 
 	let bitcoind = setup_bitcoind()?;

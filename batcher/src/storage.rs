@@ -1,63 +1,58 @@
-use bdk_wallet::rusqlite::{params, Connection, Result};
+use bdk_wallet::rusqlite::{params, Connection};
 use bitcoin::secp256k1::PublicKey;
-use std::str::FromStr;
+use std::{
+	str::FromStr,
+	time::{SystemTime, UNIX_EPOCH},
+};
+
+use crate::types::BoxError;
 
 pub struct PeerStorage {
 	conn: Connection,
 }
 
 impl PeerStorage {
-	pub fn new(path: &str) -> Result<Self> {
+	pub fn new(path: &str) -> Result<Self, BoxError> {
 		let conn = Connection::open(path)?;
 		conn.execute(
 			"CREATE TABLE IF NOT EXISTS peers (
-                node_id TEXT PRIMARY KEY,
-                node_addr TEXT NOT NULL
+                id TEXT PRIMARY KEY,
+                endpoint TEXT NOT NULL,
+				last_seen INTEGER NOT NULL
             )",
 			[],
 		)?;
 		Ok(Self { conn })
 	}
 
-	pub fn insert_peer(&self, node_id: &PublicKey, addr: String) -> Result<()> {
+	pub fn upsert_peer(&self, node_id: &PublicKey, endpoint: String) -> Result<(), BoxError> {
 		self.conn.execute(
-			"INSERT OR IGNORE INTO peers (node_id, node_addr) VALUES (?1, ?2)",
-			params![node_id.to_string(), addr.to_string()],
+			"INSERT INTO peers (id, endpoint, last_seen)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET endpoint = excluded.endpoint, last_seen = excluded.last_seen",
+			params![node_id.to_string(), endpoint, now()],
 		)?;
 		Ok(())
 	}
 
-	pub fn update_peer(&self, node_id: &PublicKey, new_addr: String) -> Result<()> {
-		self.conn.execute(
-			"UPDATE peers SET node_addr = ?1 WHERE node_id = ?2",
-			params![new_addr.to_string(), node_id.to_string()],
-		)?;
-		Ok(())
-	}
-
-	pub fn upsert_peer(&self, node_id: &PublicKey, addr: String) -> Result<()> {
-		self.conn.execute(
-			"INSERT INTO peers (node_id, node_addr)
-             VALUES (?1, ?2)
-             ON CONFLICT(node_id) DO UPDATE SET node_addr = excluded.node_addr",
-			params![node_id.to_string(), addr.to_string()],
-		)?;
-		Ok(())
-	}
-
-	pub fn delete_peer(&self, node_id: &PublicKey) -> Result<()> {
+	pub fn delete_peer(&self, node_id: &PublicKey) -> Result<(), BoxError> {
 		self.conn.execute("DELETE FROM peers WHERE node_id = ?1", params![node_id.to_string()])?;
 		Ok(())
 	}
 
-	pub fn list_peers(&self) -> Result<Vec<(PublicKey, String)>> {
-		let mut stmt = self.conn.prepare("SELECT node_id, node_addr FROM peers")?;
+	pub fn list_peers(&self) -> Result<Vec<(PublicKey, String, u64)>, BoxError> {
+		let mut stmt = self.conn.prepare("SELECT id, endpoint, last_seen FROM peers")?;
 		let rows = stmt.query_map([], |row| {
 			let node_id_str: String = row.get(0)?;
-			let addr_str: String = row.get(1)?;
+			let endpoint: String = row.get(1)?;
 			let node_id = PublicKey::from_str(&node_id_str).unwrap();
-			Ok((node_id, addr_str))
+			let last_seen: u64 = row.get(2)?;
+			Ok((node_id, endpoint, last_seen))
 		})?;
 		Ok(rows.map(Result::unwrap).collect())
 	}
+}
+
+pub fn now() -> u64 {
+	SystemTime::now().duration_since(UNIX_EPOCH).expect("cannot fail").as_secs()
 }

@@ -1,6 +1,6 @@
 [package]
 name = "cli"
-version = "0.0.2"
+version = "0.0.3"
 homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -9,6 +9,7 @@ edition.workspace = true
 [dependencies]
 batcher = { path = "../batcher" }
 rustyline = { version = "12", features = ["derive"] }
+chrono = "0.4"
 tokio.workspace = true
 bitcoin.workspace = true
 bitcoincore-rpc = { workspace = true }

@@ -1,14 +1,15 @@
-use std::error::Error;
-
 use bdk_wallet::{rusqlite::Connection, template::Bip84, KeychainKind};
 use bitcoin::{bip32::Xpriv, secp256k1::PublicKey, Amount, Network};
 use bitcoincore_rpc::{Client, RpcApi};
 
-use crate::{broker::Broker, types::PersistedWallet};
+use crate::{
+	broker::Broker,
+	types::{BoxError, PersistedWallet},
+};
 
 pub fn create_wallet(
 	seed_bytes: &[u8], network: Network, db_path: String,
-) -> Result<PersistedWallet, Box<dyn Error>> {
+) -> Result<PersistedWallet, BoxError> {
 	let xprv = Xpriv::new_master(network, seed_bytes)
 		.map_err(|e| format!("Failed to derive master secret: {}", e))?;
 
@@ -23,7 +24,7 @@ pub fn create_wallet(
 
 pub fn create_sender_multisig(
 	network: Network, sender_wif: String, node_pubkey: &PublicKey, db_path: String,
-) -> Result<PersistedWallet, Box<dyn Error>> {
+) -> Result<PersistedWallet, BoxError> {
 	// 2-of-2 descriptor
 	let descriptor = format!("wsh(multi(2,{},{}))", node_pubkey, sender_wif);
 	// Change is controlled just by other
@@ -39,9 +40,7 @@ pub fn create_sender_multisig(
 	Ok(wallet)
 }
 
-pub fn sync_wallet(
-	bitcoind_client: &Client, wallet: &mut PersistedWallet,
-) -> Result<(), Box<dyn Error>> {
+pub fn sync_wallet(bitcoind_client: &Client, wallet: &mut PersistedWallet) -> Result<(), BoxError> {
 	let latest = bitcoind_client.get_block_count()?;
 	let mut stored = wallet.latest_checkpoint().block_id().height as u64;
 	if stored == 0 {
@@ -57,7 +56,7 @@ pub fn sync_wallet(
 
 pub fn wallet_total_balance(
 	bitcoind_client: &Client, wallet: &mut PersistedWallet,
-) -> Result<Amount, Box<dyn Error>> {
+) -> Result<Amount, BoxError> {
 	sync_wallet(bitcoind_client, wallet)?;
 	let balance = wallet.balance();
 	Ok(balance.total())

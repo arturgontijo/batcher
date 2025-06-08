@@ -2,14 +2,13 @@ mod commands;
 
 use std::{
 	env,
-	error::Error,
 	process::exit,
 	sync::{Arc, RwLock},
 };
 
-use batcher::{config::NodeConfig, node::Node};
+use batcher::{config::NodeConfig, node::Node, types::BoxError};
 use bitcoincore_rpc::Client;
-use commands::{handle_command, print_help};
+use commands::{handle_command, print_subcommands_help};
 use rustyline::{
 	history::{History, MemHistory},
 	Config, Editor,
@@ -23,7 +22,7 @@ use tokio::{
 	},
 };
 
-fn run_node(config_path: &str) -> Result<(), Box<dyn Error>> {
+fn run_node(config_path: &str) -> Result<(), BoxError> {
 	let config = NodeConfig::new(config_path)?;
 	let log_file_path = config.logger.file_path.clone();
 	let node = Node::new_from_config(config)?;
@@ -43,11 +42,9 @@ fn run_node(config_path: &str) -> Result<(), Box<dyn Error>> {
 			Ok(stream) => stream,
 			Err(_) => exit(1),
 		};
-		loop {
-			select! {
-				_ = ctrl_c() => break,
-				_ = sigterm_stream.recv() => break,
-			}
+		select! {
+			_ = ctrl_c() => (),
+			_ = sigterm_stream.recv() => (),
 		}
 	});
 
@@ -59,7 +56,7 @@ fn run_node(config_path: &str) -> Result<(), Box<dyn Error>> {
 	Ok(())
 }
 
-fn interactive() -> Result<(), Box<dyn Error>> {
+fn interactive() -> Result<(), BoxError> {
 	let node: Arc<RwLock<Option<Arc<Node>>>> = Default::default();
 	let client: Arc<RwLock<Option<Arc<Client>>>> = Default::default();
 
@@ -73,7 +70,7 @@ fn interactive() -> Result<(), Box<dyn Error>> {
 
 		let prompt = ">>> ";
 
-		print_help();
+		print_subcommands_help();
 		loop {
 			match rl.readline(prompt) {
 				Ok(line) => {
@@ -105,21 +102,33 @@ fn interactive() -> Result<(), Box<dyn Error>> {
 	Ok(())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn print_help() {
+	println!("\nBatcher CLI:");
+	println!("  r  | -r | run <CONFIG.TOML>    - Run a node using CONFIG.toml file");
+	println!("  i  | -i |  interactive         - Run CLI in interactive mode");
+	println!("  h  | -h | help                 - Show this help message");
+	println!();
+}
+
+fn main() -> Result<(), BoxError> {
 	let args: Vec<String> = env::args().collect();
 
-	let mut op = "run";
+	let mut op = "help";
 	if args.len() >= 2 {
 		op = &args[1];
 	}
 
 	match op.trim() {
-		"run" => {
+		"r" | "-r" | "run" => {
 			let config_path = if args.len() >= 3 { &args[2] } else { "config.toml" };
 			run_node(config_path)?;
 		},
 		"i" | "-i" | "interactive" => interactive()?,
-		_ => eprintln!("Invalid option"),
+		"h" | "-h" | "help" => print_help(),
+		_ => {
+			eprintln!("Invalid option!");
+			print_help();
+		},
 	};
 
 	Ok(())

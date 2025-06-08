@@ -7,7 +7,9 @@ use crate::logger::{print_pubkey, SimpleLogger};
 use crate::messages::{BatchMessage, BatchMessageHandler};
 use crate::persister::InMemoryPersister;
 use crate::storage::PeerStorage;
-use crate::types::{ChainMonitor, ChannelManager, FixedFeeEstimator, MockBroadcaster, PeerManager};
+use crate::types::{
+	BoxError, ChainMonitor, ChannelManager, FixedFeeEstimator, MockBroadcaster, PeerManager,
+};
 
 use bdk_wallet::{Balance, LocalOutput};
 use bip39::{Language, Mnemonic};
@@ -36,10 +38,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 
 use std::collections::HashMap;
-use std::error::Error;
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread::sleep;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{self, Duration};
+
+const MAX_CONNECT_RETRIES: u8 = 20;
 
 #[derive(Clone)]
 pub struct Node {
@@ -61,7 +65,7 @@ impl Node {
 		alias: String, secret: &[u8; 32], host: String, port: u16, network: Network,
 		peers_db_path: String, bitcoind_config: BitcoindConfig, wallet_secret: &[u8; 32],
 		wallet_file_path: String, broker_config: BrokerConfig, logger_config: LoggerConfig,
-	) -> Result<Self, Box<dyn Error>> {
+	) -> Result<Self, BoxError> {
 		Self::inner_new(
 			alias,
 			secret,
@@ -77,7 +81,7 @@ impl Node {
 		)
 	}
 
-	pub fn new_from_config(config: NodeConfig) -> Result<Self, Box<dyn Error>> {
+	pub fn new_from_config(config: NodeConfig) -> Result<Self, BoxError> {
 		let mnemonic = Mnemonic::parse_in(Language::English, config.wallet.mnemonic)?;
 		let seed = mnemonic.to_seed("");
 		let wallet_secret: &[u8; 32] = seed[..32].try_into().unwrap();
@@ -103,7 +107,7 @@ impl Node {
 		alias: String, secret: &[u8; 32], host: String, port: u16, network: Network,
 		peers_db_path: String, bitcoind_config: BitcoindConfig, wallet_secret: &[u8; 32],
 		wallet_file_path: String, broker_config: BrokerConfig, logger_config: LoggerConfig,
-	) -> Result<Self, Box<dyn Error>> {
+	) -> Result<Self, BoxError> {
 		let secp = Secp256k1::new();
 
 		// Step 1: Initialize KeysManager
@@ -246,15 +250,15 @@ impl Node {
 
 	pub fn create_multisig(
 		&self, network: Network, other: &PublicKey, db_path: String,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		self.broker.create_multisig(network, other, db_path)
 	}
 
-	pub fn multisig_sync(&self, other: &PublicKey) -> Result<(), Box<dyn Error>> {
+	pub fn multisig_sync(&self, other: &PublicKey) -> Result<(), BoxError> {
 		self.broker.multisig_sync(other)
 	}
 
-	pub fn start(&self) -> Result<(), Box<dyn Error>> {
+	pub fn start(&self) -> Result<(), BoxError> {
 		let mut runtime_lock = self.runtime.write().unwrap();
 		if runtime_lock.is_some() {
 			return Err("Node is already running!".into());
@@ -269,7 +273,7 @@ impl Node {
 		let custom_message_handler = self.custom_message_handler.clone();
 		let channel_manager = self.channel_manager.clone();
 
-		// === 1. Background task: Event processing ===
+		// Background task: Event processing
 		let cm_clone = channel_manager.clone();
 		let eh_clone = self.event_handler.clone();
 		runtime.spawn(async move {
@@ -280,7 +284,7 @@ impl Node {
 			}
 		});
 
-		// === 2. Background task: Peer ticks (ping, cleanup) ===
+		// Background task: Peer ticks (ping, cleanup)
 		let pm_clone = peer_manager.clone();
 		runtime.spawn(async move {
 			let mut interval = time::interval(Duration::from_secs(10));
@@ -330,7 +334,7 @@ impl Node {
 			}
 		});
 
-		// === 3. Accept incoming connections ===
+		// Accept incoming connections
 		let node_id = self.id;
 		let node_alias = self.alias.clone();
 		let endpoint = self.endpoint.clone();
@@ -382,41 +386,6 @@ impl Node {
 			}
 		});
 
-		let mut peers_in_memory: HashMap<PublicKey, String> = Default::default();
-
-		// Reconnect from PeerStorage list
-		let peer_storage = self.peer_storage.lock().unwrap();
-		for (pubkey, ep) in peer_storage.list_peers()? {
-			if !self.is_peer_connected(&pubkey) {
-				log_info!(
-					self.logger,
-					"[{}][{}] PeerStorage reconnecting {}@{}",
-					self.id,
-					self.alias,
-					pubkey,
-					ep
-				);
-				self._connect(&runtime, pubkey, ep.clone(), false)?;
-				peers_in_memory.insert(pubkey, ep);
-			}
-		}
-
-		// Reconnect from config.toml bootnodes list
-		for (pubkey, ep) in self.broker.config.bootnodes.clone() {
-			if !self.is_peer_connected(&pubkey) {
-				log_info!(
-					self.logger,
-					"[{}][{}] Bootnode connecting -> {}@{}",
-					self.id,
-					self.alias,
-					pubkey,
-					ep
-				);
-				self._connect(&runtime, pubkey, ep.clone(), true)?;
-				peers_in_memory.insert(pubkey, ep);
-			}
-		}
-
 		// Wallet sync
 		let node_id = self.id;
 		let node_alias = self.alias.clone();
@@ -444,12 +413,70 @@ impl Node {
 			}
 		});
 
+		// Reconnect from PeerStorage and Bootnode list
+		let bootnodes = self.broker.config.bootnodes.clone();
+		let peer_storage = self.peer_storage.lock().unwrap();
+		let stored_peers = peer_storage.list_peers()?;
+		let stored_peers = stored_peers.iter().map(|p| (p.0, p.1.clone()));
+		let other_nodes = stored_peers.chain(bootnodes).collect::<Vec<(PublicKey, String)>>();
+		for (pubkey, ep) in other_nodes {
+			if !self.is_peer_connected(&pubkey) {
+				log_info!(
+					self.logger,
+					"[{}][{}] PeerStorage/Bootnode reconnecting {}@{}",
+					self.id,
+					self.alias,
+					pubkey,
+					ep
+				);
+				self._connect(&runtime, pubkey, ep.clone(), false, false)?;
+			}
+		}
+
+		// Background task: Update peer connection status (5 minutes interval)
+		let logger_clone = self.logger.clone();
+		let node_alias = self.alias.clone();
+		let node_id = self.id;
+		let pm_clone = self.peer_manager.clone();
+		let peer_storage = self.peer_storage.clone();
+		runtime.spawn(async move {
+			sleep(Duration::from_millis(500));
+			let mut interval = time::interval(Duration::from_secs(5 * 60));
+			loop {
+				interval.tick().await;
+				let storage = peer_storage.lock().unwrap();
+				for (other_id, other_endpoint, last_seen) in storage.list_peers().unwrap() {
+					// Update last_seen
+					if pm_clone.peer_by_node_id(&other_id).is_some() {
+						log_debug!(
+							logger_clone,
+							"[{}][{}] PeerStorage Updating node={} | last_seen={}",
+							node_id,
+							node_alias,
+							other_id,
+							last_seen,
+						);
+						storage.upsert_peer(&other_id, other_endpoint).unwrap();
+					} else {
+						log_debug!(
+							logger_clone,
+							"[{}][{}] PeerStorage Unreachable node={} | last_seen={}",
+							node_id,
+							node_alias,
+							other_id,
+							last_seen,
+						);
+					}
+				}
+			}
+		});
+
 		*runtime_lock = Some(runtime);
 
 		Ok(())
 	}
 
-	pub fn stop(&self) -> Result<(), Box<dyn Error>> {
+	pub fn stop(&self) -> Result<(), BoxError> {
 		let mut runtime_lock = self.runtime.write().unwrap();
 		if let Some(runtime) = runtime_lock.take() {
 			self.peer_manager.disconnect_all_peers();
@@ -466,86 +493,113 @@ impl Node {
 		self.peer_manager.peer_by_node_id(their_node_id).is_some()
 	}
 
-	pub fn connect(
-		&self, other_id: PublicKey, other_endpoint: String,
-	) -> Result<(), Box<dyn Error>> {
+	pub fn list_peers(&self) -> Result<Vec<(PublicKey, String, u64)>, BoxError> {
+		let storage = self.peer_storage.lock().unwrap();
+		storage.list_peers()
+	}
+
+	pub fn connect(&self, other_id: PublicKey, other_endpoint: String) -> Result<(), BoxError> {
 		let runtime_lock = self.runtime.read().unwrap();
 		let runtime = runtime_lock.as_ref().unwrap();
-		self._connect(runtime, other_id, other_endpoint, true)?;
+		self._connect(runtime, other_id, other_endpoint, true, true)?;
 		Ok(())
 	}
 
 	fn _connect(
 		&self, runtime: &Arc<Runtime>, other_id: PublicKey, other_endpoint: String, persist: bool,
-	) -> Result<(), Box<dyn Error>> {
+		announce: bool,
+	) -> Result<(), BoxError> {
 		let node_id = self.node_id();
 		let node_alias = self.alias();
+		let other_ep_cloned = other_endpoint.clone();
 		let logger = self.logger.clone();
 		let peer_storage = self.peer_storage.clone();
 		let peer_manager = self.peer_manager.clone();
 		runtime.spawn(async move {
-			match TcpStream::connect(&other_endpoint).await {
-				Ok(stream) => match stream.into_std() {
-					Ok(std_stream) => {
-						if persist {
-							let result = {
-								let storage = peer_storage.lock().unwrap();
-								storage.upsert_peer(&other_id, other_endpoint.clone())
-							};
-							match result {
-								Ok(_) => {
-									log_info!(
-										logger,
-										"[{}][{}] PeerStorage connecting {}@{}",
-										node_id,
-										node_alias,
-										other_id,
-										other_endpoint
-									);
-								},
-								Err(err) => {
-									log_error!(
-										logger,
-										"[{}][{}][ERROR] PeerStorage failed: {}@{} | {}",
-										node_id,
-										node_alias,
-										other_id,
-										other_endpoint,
-										err
-									);
-								},
+			let mut count = 0;
+			while count < MAX_CONNECT_RETRIES {
+				match TcpStream::connect(&other_ep_cloned).await {
+					Ok(stream) => match stream.into_std() {
+						Ok(std_stream) => {
+							if persist {
+								let result = {
+									let storage = peer_storage.lock().unwrap();
+									storage.upsert_peer(&other_id, other_ep_cloned.clone())
+								};
+								match result {
+									Ok(_) => {
+										log_info!(
+											logger,
+											"[{}][{}] PeerStorage connecting {}@{}",
+											node_id,
+											node_alias,
+											other_id,
+											other_ep_cloned
+										);
+									},
+									Err(err) => {
+										log_error!(
+											logger,
+											"[{}][{}] PeerStorage failed: {}@{} | {}",
+											node_id,
+											node_alias,
+											other_id,
+											other_ep_cloned,
+											err
+										);
+									},
+								}
+								// drop(peer_storage);
 							}
-							drop(peer_storage);
-						}
-						setup_outbound(peer_manager.clone(), other_id, std_stream).await
+							setup_outbound(peer_manager.clone(), other_id, std_stream).await
+						},
+						Err(e) => {
+							log_error!(
+								logger,
+								"[{}][{}] Failed to convert stream: {e}",
+								node_id,
+								node_alias
+							);
+						},
 					},
-					Err(e) => {
+					Err(_) => {
 						log_error!(
 							logger,
-							"[{}][{}][ERROR] Failed to convert stream: {e}",
+							"[{}][{}] Failed to connect to peer {} @ {}",
 							node_id,
-							node_alias
+							node_alias,
+							other_id,
+							other_ep_cloned
 						);
 					},
-				},
-				Err(_) => {
-					log_error!(
-						logger,
-						"[{}][{}][ERROR] Failed to connect to peer {} @ {}",
-						node_id,
-						node_alias,
-						other_id,
-						other_endpoint
-					);
-				},
+				}
+				count += 1;
+				sleep(Duration::from_millis(250));
 			}
 		});
+
+		if announce {
+			// Wait for handshake then send our endpoint to the connected Node
+			let mut count = 0;
+			while !self.is_peer_connected(&other_id) {
+				sleep(Duration::from_millis(250));
+				count += 1;
+				if count >= MAX_CONNECT_RETRIES {
+					break;
+				}
+			}
+
+			if count < MAX_CONNECT_RETRIES {
+				self.announce(&other_id)?;
+			}
+		}
+
 		Ok(())
 	}
 
 	pub fn build_psbt(
 		&self, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate, locktime: LockTime,
-	) -> Result<Psbt, Box<dyn Error>> {
+	) -> Result<Psbt, BoxError> {
 		self.broker.build_psbt(output_script, amount, fee_rate, locktime)
 	}
 
@@ -553,7 +607,7 @@ impl Node {
 		&self, their_node_id: PublicKey, output_script: ScriptBuf, amount: Amount,
 		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
 		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		match self.peer_manager.peer_by_node_id(&their_node_id) {
 			Some(_) => {},
 			None => {
@@ -609,7 +663,7 @@ impl Node {
 			sign: false,
 		};
 
-		self.broker.send(their_node_id, batch_psbt)?;
+		self.broker.send(&their_node_id, batch_psbt)?;
 
 		Ok(())
 	}
@@ -618,7 +672,7 @@ impl Node {
 		&self, other: &PublicKey, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate,
 		locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
 		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		let mut psbt =
 			self.broker.multisig_build_psbt(other, output_script, amount, fee_rate, locktime)?;
 
@@ -662,7 +716,7 @@ impl Node {
 				psbt: psbt.serialize(),
 				sign: false,
 			};
-			self.broker.send(pd.counterparty_node_id, batch_psbt)?;
+			self.broker.send(&pd.counterparty_node_id, batch_psbt)?;
 		} else {
 			return Err("Node has no connected peers!".into());
 		}
@@ -670,7 +724,7 @@ impl Node {
 		Ok(())
 	}
 
-	pub fn sync_wallet(&self) -> Result<(), Box<dyn Error>> {
+	pub fn sync_wallet(&self) -> Result<(), BoxError> {
 		self.broker.sync_wallet()
 	}
 
@@ -678,43 +732,41 @@ impl Node {
 		self.broker.balance()
 	}
 
-	pub fn multisig_balance(&self, other: &PublicKey) -> Result<Balance, Box<dyn Error>> {
+	pub fn multisig_balance(&self, other: &PublicKey) -> Result<Balance, BoxError> {
 		self.broker.multisig_balance(other)
 	}
 
-	pub fn multisig_new_address(&self, other: &PublicKey) -> Result<Address, Box<dyn Error>> {
+	pub fn multisig_new_address(&self, other: &PublicKey) -> Result<Address, BoxError> {
 		self.broker.multisig_new_address(other)
 	}
 
-	pub fn wallet_new_address(&self) -> Result<Address, Box<dyn Error>> {
+	pub fn wallet_new_address(&self) -> Result<Address, BoxError> {
 		self.broker.wallet_new_address()
 	}
 
 	pub fn add_utxos_to_psbt(
 		&self, psbt: &mut Psbt, max_count: u8, uniform_amount: Option<Amount>, fee: Amount,
 		payer: bool,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		self.broker.add_utxos_to_psbt(psbt, max_count, uniform_amount, fee, payer)
 	}
 
 	pub fn multisig_add_utxos_to_psbt(
 		&self, other: &PublicKey, psbt: &mut Psbt, max_count: u8, uniform_amount: Option<Amount>,
 		fee: Amount, payer: bool,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		self.broker.multisig_add_utxos_to_psbt(other, psbt, max_count, uniform_amount, fee, payer)
 	}
 
-	pub fn sign_psbt(&self, psbt: &mut Psbt) -> Result<(), Box<dyn Error>> {
+	pub fn sign_psbt(&self, psbt: &mut Psbt) -> Result<(), BoxError> {
 		self.broker.sign_psbt(psbt)
 	}
 
-	pub fn multisig_sign_psbt(
-		&self, other: &PublicKey, psbt: &mut Psbt,
-	) -> Result<(), Box<dyn Error>> {
+	pub fn multisig_sign_psbt(&self, other: &PublicKey, psbt: &mut Psbt) -> Result<(), BoxError> {
 		self.broker.multisig_sign_psbt(other, psbt)
 	}
 
-	pub fn broadcast_transactions(&self, tx: &Transaction) -> Result<Txid, Box<dyn Error>> {
+	pub fn broadcast_transactions(&self, tx: &Transaction) -> Result<Txid, BoxError> {
 		self.broker.broadcast_transaction(tx)
 	}
 
@@ -723,7 +775,7 @@ impl Node {
 		utxos: Vec<LocalOutput>, locktime: LockTime, uniform_amount: bool,
 		fee_per_participant: Amount, max_participants: u8, max_utxo_per_participant: u8,
 		max_hops: u8,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		if let Some(pd) = self.peer_manager.list_peers().first() {
 			let uniform_amount_opt = if uniform_amount { Some(amount) } else { None };
 
@@ -755,10 +807,27 @@ impl Node {
 				sign: false,
 			};
 
-			self.broker.send(pd.counterparty_node_id, batch_psbt)?;
+			self.broker.send(&pd.counterparty_node_id, batch_psbt)?;
 
 			return Ok(());
 		}
 		Err("Can't build the PSBT!".into())
+	}
+
+	fn announce(&self, their_node_id: &PublicKey) -> Result<(), BoxError> {
+		let announcement = BatchMessage::Announcement {
+			sender_node_id: self.node_id(),
+			receiver_node_id: *their_node_id,
+			endpoint: self.endpoint(),
+		};
+		log_debug!(
+			self.logger,
+			"[{}][{}] Sending Announcement to {}",
+			self.id,
+			self.alias,
+			their_node_id,
+		);
+		self.broker.send(their_node_id, announcement)?;
+		Ok(())
 	}
 }

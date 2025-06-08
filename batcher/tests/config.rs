@@ -1,11 +1,12 @@
 mod common;
 
-use std::{error::Error, sync::Arc};
+use std::sync::Arc;
 
 use batcher::{
 	bitcoind::{fund_address, setup_bitcoind, wait_for_block},
 	config::{BrokerConfig, LoggerConfig, NodeConfig, WalletConfig},
 	node::Node,
+	types::BoxError,
 	wallet::create_wallet,
 };
 
@@ -14,7 +15,7 @@ use bitcoin::{absolute::LockTime, Amount, FeeRate, Network, Psbt};
 use common::{broadcast_tx, create_temp_dir, setup_nodes};
 
 #[test]
-fn batcher_from_config() -> Result<(), Box<dyn Error>> {
+fn batcher_from_config() -> Result<(), BoxError> {
 	let network = Network::Regtest;
 
 	let bitcoind = setup_bitcoind()?;

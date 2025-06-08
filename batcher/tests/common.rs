@@ -4,21 +4,21 @@ use bitcoincore_rpc::{Client, RpcApi};
 use node::Node;
 use rand::Rng;
 
-use std::{error::Error, fs, io, path::PathBuf, sync::Arc, thread::sleep};
+use std::{fs, io, path::PathBuf, sync::Arc, thread::sleep};
 use tokio::time::Duration;
 
 use batcher::{
 	bitcoind::{wait_for_block, BitcoindConfig},
 	config::{BrokerConfig, LoggerConfig},
 	node,
-	types::PersistedWallet,
+	types::{BoxError, PersistedWallet},
 	wallet::wallet_total_balance,
 };
 
 pub fn setup_nodes(
 	count: u8, mut port: u16, network: Network, bitcoind_config: BitcoindConfig,
 	broker_config: BrokerConfig,
-) -> Result<Vec<Arc<Node>>, Box<dyn Error>> {
+) -> Result<Vec<Arc<Node>>, BoxError> {
 	let mut nodes = vec![];
 	let mut rng = rand::thread_rng();
 	let temp_dir = create_temp_dir("temp")?;
@@ -52,7 +52,7 @@ pub fn setup_nodes(
 	Ok(nodes)
 }
 
-pub fn connect(node: &Node, other: &Node) -> Result<(), Box<dyn Error>> {
+pub fn connect(node: &Node, other: &Node) -> Result<(), BoxError> {
 	node.connect(other.node_id(), other.endpoint())
 }
 
@@ -69,7 +69,7 @@ pub fn broadcast_tx(
 	bitcoind_client: &Client, starting_node: &Node, nodes: &Vec<Arc<Node>>,
 	receiver: &mut PersistedWallet,
 	multisig_signers: Option<(&Node, &PublicKey, &PersistedWallet)>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
 	let mut batch_psbts = starting_node.broker.get_batch_psbts()?;
 	while batch_psbts.is_empty() {
 		wait_for_block(bitcoind_client, 2)?;

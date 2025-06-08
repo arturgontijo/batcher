@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -9,13 +8,15 @@ use lightning::util::logger::Level;
 use lightning::util::logger::Logger;
 use lightning::util::logger::Record;
 
+use crate::types::BoxError;
+
 pub struct SimpleLogger {
 	file_path: String,
 	log_max_level: Level,
 }
 
 impl SimpleLogger {
-	pub fn new(file_path: String, log_max_level: Level) -> Result<Self, Box<dyn Error>> {
+	pub fn new(file_path: String, log_max_level: Level) -> Result<Self, BoxError> {
 		if let Some(parent_dir) = Path::new(&file_path).parent() {
 			match fs::create_dir_all(parent_dir) {
 				Ok(_) => {},

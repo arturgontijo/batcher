@@ -12,6 +12,7 @@ use lightning::sign::KeysManager;
 
 use lightning_net_tokio::SocketDescriptor;
 
+use std::error::Error;
 use std::sync::{Arc, Mutex};
 
 use crate::logger::SimpleLogger;
@@ -115,3 +116,5 @@ pub type MessageRouter = lightning::onion_message::messenger::DefaultMessageRout
 //     IgnoringMessageHandler,
 //     IgnoringMessageHandler,
 // >;
+
+pub type BoxError = Box<dyn Error>;

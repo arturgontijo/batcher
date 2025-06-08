@@ -1,6 +1,5 @@
 use std::{
 	collections::HashMap,
-	error::Error,
 	sync::{Arc, Mutex},
 };
 
@@ -29,7 +28,7 @@ use crate::{
 	config::BrokerConfig,
 	logger::SimpleLogger,
 	messages::{BatchMessage, BatchMessageHandler},
-	types::PersistedWallet,
+	types::{BoxError, PersistedWallet},
 	wallet::sync_wallet,
 };
 
@@ -53,7 +52,7 @@ impl Broker {
 		node_id: PublicKey, node_alias: String, wallet_secret: &[u8; 32], network: Network,
 		config: BrokerConfig, bitcoind_config: BitcoindConfig, wallet_file_path: String,
 		custom_message_handler: Arc<BatchMessageHandler>, logger: Arc<SimpleLogger>,
-	) -> Result<Self, Box<dyn Error>> {
+	) -> Result<Self, BoxError> {
 		let secp = Secp256k1::new();
 		let secret_key = SecretKey::from_slice(wallet_secret)?;
 		let pubkey = PublicKey::from_secret_key(&secp, &secret_key);
@@ -88,7 +87,7 @@ impl Broker {
 
 	fn create_wallet(
 		seed_bytes: &[u8; 32], network: Network, persister: &mut Connection,
-	) -> Result<PersistedWallet, Box<dyn Error>> {
+	) -> Result<PersistedWallet, BoxError> {
 		let xprv = Xpriv::new_master(network, seed_bytes)
 			.map_err(|e| format!("Failed to derive master secret: {}", e))?;
 		Self::create_persisted_wallet(
@@ -101,7 +100,7 @@ impl Broker {
 
 	pub fn create_multisig(
 		&self, network: Network, other: &PublicKey, db_path: String,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		// 2-of-2 descriptor
 		let descriptor = format!("wsh(multi(2,{},{}))", self.wif, other);
@@ -120,7 +119,7 @@ impl Broker {
 
 	pub fn create_persisted_wallet<D: IntoWalletDescriptor + Send + Clone + 'static>(
 		network: Network, persister: &mut Connection, descriptor: D, change_descriptor: D,
-	) -> Result<PersistedWallet, Box<dyn Error>> {
+	) -> Result<PersistedWallet, BoxError> {
 		let wallet_opt = Wallet::load()
 			.descriptor(KeychainKind::External, Some(descriptor.clone()))
 			.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
@@ -137,7 +136,7 @@ impl Broker {
 		Ok(wallet)
 	}
 
-	pub fn sync_wallet(&self) -> Result<(), Box<dyn Error>> {
+	pub fn sync_wallet(&self) -> Result<(), BoxError> {
 		let mut binding = self.wallets.lock().unwrap();
 		let wallet = binding.get_mut(&self.pubkey).unwrap();
 		sync_wallet(&self.bitcoind_client, wallet)?;
@@ -146,7 +145,7 @@ impl Broker {
 		Ok(())
 	}
 
-	pub fn multisig_sync(&self, other: &PublicKey) -> Result<(), Box<dyn Error>> {
+	pub fn multisig_sync(&self, other: &PublicKey) -> Result<(), BoxError> {
 		let mut multisigs = self.wallets.lock().unwrap();
 		if let Some(wallet) = multisigs.get_mut(other) {
 			sync_wallet(&self.bitcoind_client, wallet)?;
@@ -154,7 +153,7 @@ impl Broker {
 		Ok(())
 	}
 
-	pub fn multisig_new_address(&self, other: &PublicKey) -> Result<Address, Box<dyn Error>> {
+	pub fn multisig_new_address(&self, other: &PublicKey) -> Result<Address, BoxError> {
 		let mut multisigs = self.wallets.lock().unwrap();
 		if let Some(wallet) = multisigs.get_mut(other) {
 			let address = wallet.reveal_next_address(KeychainKind::External).address;
@@ -163,7 +162,7 @@ impl Broker {
 		Err("Multisig not found!".into())
 	}
 
-	pub fn wallet_new_address(&self) -> Result<Address, Box<dyn Error>> {
+	pub fn wallet_new_address(&self) -> Result<Address, BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		let wallet = wallets.get_mut(&self.pubkey).unwrap();
 		let address = wallet.reveal_next_address(KeychainKind::External).address;
@@ -174,7 +173,7 @@ impl Broker {
 		self.wallets.lock().unwrap().get(&self.pubkey).unwrap().balance()
 	}
 
-	pub fn multisig_balance(&self, other: &PublicKey) -> Result<Balance, Box<dyn Error>> {
+	pub fn multisig_balance(&self, other: &PublicKey) -> Result<Balance, BoxError> {
 		let multisigs = self.wallets.lock().unwrap();
 		match multisigs.get(other) {
 			Some(wallet) => Ok(wallet.balance()),
@@ -182,7 +181,7 @@ impl Broker {
 		}
 	}
 
-	pub fn list_unspent(&self) -> Result<Vec<LocalOutput>, Box<dyn Error>> {
+	pub fn list_unspent(&self) -> Result<Vec<LocalOutput>, BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		let wallet = wallets.get_mut(&self.pubkey).unwrap();
 		let utxos = wallet.list_unspent().collect();
@@ -191,7 +190,7 @@ impl Broker {
 
 	pub fn build_psbt(
 		&self, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate, locktime: LockTime,
-	) -> Result<Psbt, Box<dyn Error>> {
+	) -> Result<Psbt, BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		let wallet = wallets.get_mut(&self.pubkey).unwrap();
 		self._build_psbt(wallet, output_script, amount, fee_rate, locktime)
@@ -200,7 +199,7 @@ impl Broker {
 	pub fn multisig_build_psbt(
 		&self, other: &PublicKey, script_pubkey: ScriptBuf, amount: Amount, fee_rate: FeeRate,
 		locktime: LockTime,
-	) -> Result<Psbt, Box<dyn Error>> {
+	) -> Result<Psbt, BoxError> {
 		let mut multisigs = self.wallets.lock().unwrap();
 		if let Some(wallet) = multisigs.get_mut(other) {
 			let psbt = self._build_psbt(wallet, script_pubkey, amount, fee_rate, locktime)?;
@@ -212,7 +211,7 @@ impl Broker {
 	fn _build_psbt(
 		&self, wallet: &mut PersistedWallet, output_script: ScriptBuf, amount: Amount,
 		fee_rate: FeeRate, locktime: LockTime,
-	) -> Result<Psbt, Box<dyn Error>> {
+	) -> Result<Psbt, BoxError> {
 		let mut tx_builder = wallet.build_tx();
 		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
 		let psbt = match tx_builder.finish() {
@@ -226,7 +225,7 @@ impl Broker {
 	pub fn add_utxos_to_psbt(
 		&self, psbt: &mut Psbt, max_count: u8, uniform_amount: Option<Amount>, fee: Amount,
 		payer: bool,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		let wallet = wallets.get_mut(&self.pubkey).unwrap();
 		self._add_utxos_to_psbt(wallet, None, psbt, max_count, uniform_amount, fee, payer)
@@ -235,7 +234,7 @@ impl Broker {
 	pub fn multisig_add_utxos_to_psbt(
 		&self, other: &PublicKey, psbt: &mut Psbt, max_count: u8, uniform_amount: Option<Amount>,
 		fee: Amount, payer: bool,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		if let Some(wallet) = wallets.get_mut(other) {
 			self._add_utxos_to_psbt(
@@ -254,7 +253,7 @@ impl Broker {
 	fn _add_utxos_to_psbt(
 		&self, wallet: &mut PersistedWallet, other_opt: Option<&PublicKey>, psbt: &mut Psbt,
 		max_count: u8, uniform_amount: Option<Amount>, fee: Amount, payer: bool,
-	) -> Result<(), Box<dyn Error>> {
+	) -> Result<(), BoxError> {
 		let mut count = 0;
 		let mut utxos_value = Amount::from_sat(0);
 
@@ -365,7 +364,7 @@ impl Broker {
 		&self, change_scriptbuf: ScriptBuf, output_script: ScriptBuf, amount: Amount,
 		utxos: Vec<LocalOutput>, locktime: LockTime, uniform_amount: Option<Amount>,
 		fee_per_participant: Amount, max_participants: u8, max_utxo_per_participant: u8,
-	) -> Result<Psbt, Box<dyn Error>> {
+	) -> Result<Psbt, BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		if let Some(wallet) = wallets.get_mut(&self.pubkey) {
 			let mut tx_builder = wallet.build_tx();
@@ -433,9 +432,7 @@ impl Broker {
 		Err("Can't build the PSBT!".into())
 	}
 
-	pub fn multisig_sign_psbt(
-		&self, other: &PublicKey, psbt: &mut Psbt,
-	) -> Result<(), Box<dyn Error>> {
+	pub fn multisig_sign_psbt(&self, other: &PublicKey, psbt: &mut Psbt) -> Result<(), BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		if let Some(wallet) = wallets.get_mut(other) {
 			wallet.sign(psbt, SignOptions::default())?;
@@ -445,7 +442,7 @@ impl Broker {
 		Ok(())
 	}
 
-	pub fn sign_psbt(&self, psbt: &mut Psbt) -> Result<(), Box<dyn Error>> {
+	pub fn sign_psbt(&self, psbt: &mut Psbt) -> Result<(), BoxError> {
 		let mut wallets = self.wallets.lock().unwrap();
 		if let Some(wallet) = wallets.get_mut(&self.pubkey) {
 			wallet.sign(psbt, SignOptions::default())?;
@@ -455,7 +452,7 @@ impl Broker {
 		Ok(())
 	}
 
-	pub fn send(&self, their_node_id: PublicKey, msg: BatchMessage) -> Result<(), Box<dyn Error>> {
+	pub fn send(&self, their_node_id: &PublicKey, msg: BatchMessage) -> Result<(), BoxError> {
 		log_debug!(
 			self.logger,
 			"[{}][{}] Sending: to={} | {:?}",
@@ -464,31 +461,31 @@ impl Broker {
 			their_node_id,
 			msg,
 		);
-		self.custom_message_handler.send(their_node_id, msg);
+		self.custom_message_handler.send(*their_node_id, msg);
 		Ok(())
 	}
 
-	pub fn push_to_batch_psbts(&self, psbt: Vec<u8>) -> Result<(), Box<dyn Error>> {
+	pub fn push_to_batch_psbts(&self, psbt: Vec<u8>) -> Result<(), BoxError> {
 		let mut unlocked = self.batch_psbts.lock().unwrap();
 		unlocked.push(psbt);
 		Ok(())
 	}
 
-	pub fn get_batch_psbts(&self) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
+	pub fn get_batch_psbts(&self) -> Result<Vec<Vec<u8>>, BoxError> {
 		match self.batch_psbts.try_lock() {
 			Ok(mut psbts) => Ok(std::mem::take(&mut *psbts)),
 			Err(_) => Ok(vec![]),
 		}
 	}
 
-	pub fn len_batch_psbts(&self) -> Result<usize, Box<dyn Error>> {
+	pub fn len_batch_psbts(&self) -> Result<usize, BoxError> {
 		match self.batch_psbts.try_lock() {
 			Ok(psbts) => Ok(psbts.len()),
 			Err(_) => Ok(0),
 		}
 	}
 
-	pub fn broadcast_transaction(&self, tx: &Transaction) -> Result<Txid, Box<dyn Error>> {
+	pub fn broadcast_transaction(&self, tx: &Transaction) -> Result<Txid, BoxError> {
 		match self.bitcoind_client.send_raw_transaction(tx) {
 			Ok(txid) => Ok(txid),
 			Err(err) => Err(format!("Failed to broadcast Tx :{}", err).into()),
