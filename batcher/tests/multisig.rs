@@ -2,7 +2,6 @@ mod common;
 
 use batcher::bitcoind::BitcoindConfig;
 use batcher::bitcoind::{self, setup_bitcoind};
-use batcher::config::BrokerConfig;
 use batcher::types::BoxError;
 use batcher::wallet;
 
@@ -33,8 +32,8 @@ fn batcher_as_multisig() -> Result<(), BoxError> {
 
 	let bitcoind_config = BitcoindConfig::new(&bitcoind.rpc_url(), "bitcoind", "bitcoind");
 
-	let broker_config = BrokerConfig::new(vec![], 25_000, 4, 60);
-	let nodes = setup_nodes(12, 7777, network, bitcoind_config.clone(), broker_config)?;
+	let nodes =
+		setup_nodes(12, 7777, network, bitcoind_config.clone(), &temp_dir, vec![], 25_000, 4, 60)?;
 
 	for (idx, node) in nodes.iter().enumerate() {
 		// N2 and N10 must have no UTXOs

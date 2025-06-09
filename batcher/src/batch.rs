@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use crate::broker::Broker;
 use crate::logger::{print_pubkey, SimpleLogger};
 use crate::messages::BatchMessage;
-use crate::storage::PeerStorage;
+use crate::storage::{BatchPsbtStatus, PeerStorage};
 use crate::types::{BoxError, PeerManager};
 
 pub(crate) fn process_batch_messages(
@@ -25,6 +25,7 @@ pub(crate) fn process_batch_messages(
 ) -> Result<(), BoxError> {
 	log_debug!(logger, "{:?}", msg);
 	if let BatchMessage::BatchPsbt {
+		id,
 		sender_node_id,
 		receiver_node_id: _,
 		uniform_amount,
@@ -42,9 +43,10 @@ pub(crate) fn process_batch_messages(
 	{
 		log_info!(
 			logger,
-			"[{}][{}] BatchPsbt: snd={} | uamt={} | fee={} | utxos={} | max_p={} | pts={} | ep={} | n_pts={} | hops={}/{} | len={} | sign={}",
+			"[{}][{}] BatchPsbt(id={}): snd={} | uamt={} | fee={} | utxos={} | max_p={} | pts={} | ep={} | n_pts={} | hops={}/{} | len={} | sign={}",
 			node_id,
 			node_alias,
+			id,
 			print_pubkey(&sender_node_id),
 			uniform_amount,
 			fee_per_participant,
@@ -72,6 +74,7 @@ pub(crate) fn process_batch_messages(
 				last_participant_endpoint,
 			)?;
 			let msg = BatchMessage::BatchPsbt {
+				id,
 				sender_node_id: *node_id,
 				receiver_node_id: last_participant_id,
 				uniform_amount,
@@ -206,6 +209,7 @@ pub(crate) fn process_batch_messages(
 
 			let next_node_id = next_node_id.unwrap();
 			let msg = BatchMessage::BatchPsbt {
+				id,
 				sender_node_id: *node_id,
 				receiver_node_id: next_node_id,
 				uniform_amount,
@@ -245,6 +249,7 @@ pub(crate) fn process_batch_messages(
 				)?;
 				if peer_manager.peer_by_node_id(&next_signer_node_id).is_some() {
 					let msg = BatchMessage::BatchPsbt {
+						id,
 						sender_node_id: *node_id,
 						receiver_node_id: next_signer_node_id,
 						uniform_amount,
@@ -277,7 +282,7 @@ pub(crate) fn process_batch_messages(
 					node_alias,
 					psbt.len()
 				);
-				broker.push_to_batch_psbts(psbt).unwrap();
+				broker.upsert_psbt(Some(id), BatchPsbtStatus::Ready, &Psbt::deserialize(&psbt)?)?;
 			}
 		}
 	} else if let BatchMessage::Announcement { sender_node_id, receiver_node_id, endpoint } = msg {

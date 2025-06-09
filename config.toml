@@ -16,6 +16,7 @@ file_path = "/tmp/batcher_wallet.db"
 
 # Broker
 [broker]
+storage_path = "/tmp/batcher_broker.db"
 # Initial nodes to connect to (eg. [(pubkey, endpoint)])
 bootnodes = []
 minimum_fee = 10_000
@@ -25,7 +26,7 @@ wallet_sync_interval = 60
 # Logger
 [logger]
 file_path = "/tmp/batcher_logger.log"
-max_level = "info"
+max_level = "debug"
 
 # Bitcoind
 [bitcoind]

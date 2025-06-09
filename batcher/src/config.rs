@@ -41,6 +41,7 @@ impl WalletConfig {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct BrokerConfig {
+	pub storage_path: String,
 	pub bootnodes: Vec<(PublicKey, String)>,
 	pub minimum_fee: u64,
 	pub max_utxo_count: u8,
@@ -49,10 +50,10 @@ pub struct BrokerConfig {
 
 impl BrokerConfig {
 	pub fn new(
-		bootnodes: Vec<(PublicKey, String)>, minimum_fee: u64, max_utxo_count: u8,
-		wallet_sync_interval: u8,
+		storage_path: String, bootnodes: Vec<(PublicKey, String)>, minimum_fee: u64,
+		max_utxo_count: u8, wallet_sync_interval: u8,
 	) -> Self {
-		Self { bootnodes, minimum_fee, max_utxo_count, wallet_sync_interval }
+		Self { storage_path, bootnodes, minimum_fee, max_utxo_count, wallet_sync_interval }
 	}
 }
 

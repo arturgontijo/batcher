@@ -2,7 +2,6 @@ mod common;
 
 use batcher::bitcoind::BitcoindConfig;
 use batcher::bitcoind::{self, setup_bitcoind};
-use batcher::config::BrokerConfig;
 use batcher::node::Node;
 use batcher::types::BoxError;
 use batcher::wallet;
@@ -15,15 +14,16 @@ use bitcoind::{fund_address, wait_for_block};
 use common::{broadcast_tx, connect, create_temp_dir, setup_nodes};
 use wallet::create_wallet;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::sleep;
 use tokio::time::Duration;
 
 fn setup_network(
-	client: &Client, network: Network, bitcoind_config: BitcoindConfig,
+	client: &Client, network: Network, bitcoind_config: BitcoindConfig, temp_dir: &PathBuf,
 ) -> Result<Vec<Arc<Node>>, BoxError> {
-	let broker_config = BrokerConfig::new(vec![], 25_000, 2, 60);
-	let nodes = setup_nodes(8, 7777, network, bitcoind_config.clone(), broker_config)?;
+	let nodes =
+		setup_nodes(8, 7777, network, bitcoind_config.clone(), temp_dir, vec![], 25_000, 2, 60)?;
 
 	for node in &nodes {
 		fund_address(&client, node.wallet_new_address()?, Amount::from_sat(1_000_000), 10)?;
@@ -67,7 +67,7 @@ fn batcher_as_node() -> Result<(), BoxError> {
 
 	let bitcoind_config = BitcoindConfig::new(&bitcoind.rpc_url(), "bitcoind", "bitcoind");
 
-	let nodes = setup_network(&bitcoind.client, network, bitcoind_config)?;
+	let nodes = setup_network(&bitcoind.client, network, bitcoind_config, &temp_dir)?;
 
 	// Sender's node index
 	let starting_node_idx = 7;

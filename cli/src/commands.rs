@@ -1,5 +1,8 @@
-use batcher::{bitcoind::bitcoind_client, config::NodeConfig, node::Node, types::BoxError};
-use bitcoin::{absolute::LockTime, secp256k1::PublicKey, Address, Amount, FeeRate, Psbt};
+use batcher::{
+	bitcoind::bitcoind_client, config::NodeConfig, node::Node, storage::BatchPsbtStatus,
+	types::BoxError,
+};
+use bitcoin::{absolute::LockTime, secp256k1::PublicKey, Address, Amount, FeeRate};
 use bitcoincore_rpc::{Client, RpcApi};
 use chrono::{DateTime, Utc};
 use std::{
@@ -49,7 +52,7 @@ pub fn handle_command(
 				for utxo in &utxos {
 					value += utxo.txout.value;
 				}
-				let psbts = node.broker.len_batch_psbts()?;
+				let psbts = node.broker.next_id()?;
 				println!(
 					"[{}][{}] Stats: peers={} | utxos={} | value={} | psbts={}",
 					node.node_id(),
@@ -202,35 +205,33 @@ pub fn handle_command(
 		"broadcast" | "bc" => {
 			let unlocked = node.read().unwrap();
 			if let Some(node) = unlocked.clone() {
-				match node.broker.get_batch_psbts() {
-					Ok(psbts) => {
-						if !psbts.is_empty() {
-							let psbt_bytes = psbts.first().unwrap();
-							let psbt = Psbt::deserialize(psbt_bytes).unwrap();
-							let tx = psbt.extract_tx()?;
-							println!("\nTx Inputs/Outputs:\n");
-							for input in tx.input.iter() {
-								let tx_info = node
-									.broker
-									.bitcoind_client
-									.get_raw_transaction_info(&input.previous_output.txid, None)?;
-								let value = tx_info.vout[input.previous_output.vout as usize].value;
-								println!("====> In  ({})", value);
-							}
+				for batch_psbt in node.broker.stored_psbts(BatchPsbtStatus::Ready)? {
+					let psbt = batch_psbt.psbt.clone();
+					let tx = psbt.clone().extract_tx()?;
+					println!("\nTx Inputs/Outputs:\n");
+					for input in tx.input.iter() {
+						let tx_info = node
+							.broker
+							.bitcoind_client
+							.get_raw_transaction_info(&input.previous_output.txid, None)?;
+						let value = tx_info.vout[input.previous_output.vout as usize].value;
+						println!("====> In  ({})", value);
+					}
 
-							for output in tx.output.iter() {
-								println!("====> Out ({})", output.value);
-							}
+					for output in tx.output.iter() {
+						println!("====> Out ({})", output.value);
+					}
 
-							println!("\nSending Tx (id={})...\n", tx.compute_txid());
+					println!("\nSending Tx (id={})...\n", tx.compute_txid());
 
-							let tx_id = node.broadcast_transactions(&tx)?;
-							println!("Tx Sent (id={})\n", tx_id);
-						} else {
-							println!("No PSBT available yet.");
-						}
-					},
-					Err(_) => println!("Failed to fetch PSBTs from Node."),
+					let tx_id = node.broadcast_transactions(&tx)?;
+					println!("Tx Sent (id={})\n", tx_id);
+
+					node.broker.upsert_psbt(
+						Some(batch_psbt.id),
+						BatchPsbtStatus::Completed,
+						&psbt,
+					)?;
 				}
 			} else {
 				println!("Node is not running.");

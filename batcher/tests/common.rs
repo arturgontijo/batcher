@@ -1,5 +1,5 @@
 use bdk_wallet::SignOptions;
-use bitcoin::{secp256k1::PublicKey, Network, Psbt};
+use bitcoin::{secp256k1::PublicKey, Network};
 use bitcoincore_rpc::{Client, RpcApi};
 use node::Node;
 use rand::Rng;
@@ -11,17 +11,18 @@ use batcher::{
 	bitcoind::{wait_for_block, BitcoindConfig},
 	config::{BrokerConfig, LoggerConfig},
 	node,
+	storage::BatchPsbtStatus,
 	types::{BoxError, PersistedWallet},
 	wallet::wallet_total_balance,
 };
 
 pub fn setup_nodes(
 	count: u8, mut port: u16, network: Network, bitcoind_config: BitcoindConfig,
-	broker_config: BrokerConfig,
+	temp_dir: &PathBuf, bootnodes: Vec<(PublicKey, String)>, minimum_fee: u64, max_utxo_count: u8,
+	wallet_sync_interval: u8,
 ) -> Result<Vec<Arc<Node>>, BoxError> {
 	let mut nodes = vec![];
 	let mut rng = rand::thread_rng();
-	let temp_dir = create_temp_dir("temp")?;
 	for i in 0..count {
 		let secret: [u8; 32] = rng.gen();
 		let wallet_secret: [u8; 32] = rng.gen();
@@ -33,13 +34,19 @@ pub fn setup_nodes(
 			"0.0.0.0".to_string(),
 			port,
 			network,
-			format!("{}/peers_db_{}.db", temp_dir.display(), wallet_name),
+			format!("{}/peers_{}.db", temp_dir.display(), i),
 			bitcoind_config.clone(),
 			&wallet_secret,
 			format!("{}/wallet_{}.db", temp_dir.display(), wallet_name),
-			broker_config.clone(),
+			BrokerConfig::new(
+				format!("{}/broker_{}.db", temp_dir.display(), i),
+				bootnodes.clone(),
+				minimum_fee,
+				max_utxo_count,
+				wallet_sync_interval,
+			),
 			LoggerConfig::new(
-				format!("{}/logger_{}.db", temp_dir.display(), i),
+				format!("{}/logger_{}.log", temp_dir.display(), i),
 				"info".to_string(),
 			),
 		)?);
@@ -70,18 +77,18 @@ pub fn broadcast_tx(
 	receiver: &mut PersistedWallet,
 	multisig_signers: Option<(&Node, &PublicKey, &PersistedWallet)>,
 ) -> Result<(), BoxError> {
-	let mut batch_psbts = starting_node.broker.get_batch_psbts()?;
+	let mut batch_psbts = starting_node.broker.stored_psbts(BatchPsbtStatus::Ready)?;
 	while batch_psbts.is_empty() {
 		wait_for_block(bitcoind_client, 2)?;
-		batch_psbts = starting_node.broker.get_batch_psbts()?;
+		batch_psbts = starting_node.broker.stored_psbts(BatchPsbtStatus::Ready)?;
 	}
 
 	// Sender has the final PSBT (signed by all participants) now
-	println!("\nSender Node has the fully signed PSBT.\n");
+	println!("\nSender Node's PSBT is Ready (signed by all participants).\n");
 	assert!(batch_psbts.len() == 1);
-	let psbt_hex = batch_psbts.first().unwrap();
 
-	let mut psbt = Psbt::deserialize(&psbt_hex).unwrap();
+	let batch_psbt = batch_psbts.first().unwrap();
+	let mut psbt = batch_psbt.psbt.clone();
 
 	if let Some((node, sender_pubkey, sender)) = multisig_signers {
 		// Multisig signatures
@@ -90,7 +97,7 @@ pub fn broadcast_tx(
 	}
 
 	println!("Extracting Tx...\n");
-	let tx = psbt.extract_tx()?;
+	let tx = psbt.clone().extract_tx()?;
 
 	for node in nodes {
 		node.sync_wallet()?;
@@ -121,6 +128,8 @@ pub fn broadcast_tx(
 	println!("Tx Sent (id={})\n", tx_id);
 
 	wait_for_block(&bitcoind_client, 3)?;
+
+	starting_node.broker.upsert_psbt(Some(batch_psbt.id), BatchPsbtStatus::Completed, &psbt)?;
 
 	for node in nodes {
 		node.sync_wallet()?;

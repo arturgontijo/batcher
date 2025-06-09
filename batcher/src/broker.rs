@@ -28,6 +28,7 @@ use crate::{
 	config::BrokerConfig,
 	logger::SimpleLogger,
 	messages::{BatchMessage, BatchMessageHandler},
+	storage::{BatchPsbtStatus, BatchPsbtStored, BrokerStorage},
 	types::{BoxError, PersistedWallet},
 	wallet::sync_wallet,
 };
@@ -41,7 +42,7 @@ pub struct Broker {
 	pub pubkey: PublicKey,
 	pub wif: String,
 	pub wallets: Arc<Mutex<HashMap<PublicKey, PersistedWallet>>>,
-	pub batch_psbts: Arc<Mutex<Vec<Vec<u8>>>>,
+	pub storage: Arc<Mutex<BrokerStorage>>,
 	pub bitcoind_client: Arc<Client>,
 	pub persister: Arc<Mutex<Connection>>,
 	pub logger: Arc<SimpleLogger>,
@@ -61,12 +62,12 @@ impl Broker {
 			bitcoin::PrivateKey { compressed: true, network: NetworkKind::Test, inner: secret_key }
 				.to_wif();
 
+		let storage = BrokerStorage::new(&config.storage_path)?;
+
 		let mut persister = Connection::open(wallet_file_path)?;
 		let wallet = Self::create_wallet(wallet_secret, network, &mut persister)?;
 
 		let wallets = Arc::new(Mutex::new(HashMap::from([(pubkey, wallet)])));
-
-		let batch_psbts = Arc::new(Mutex::new(vec![]));
 
 		let BitcoindConfig { rpc_address, rpc_user, rpc_pass } = bitcoind_config;
 
@@ -78,7 +79,7 @@ impl Broker {
 			pubkey,
 			wif,
 			wallets,
-			batch_psbts,
+			storage: Arc::new(Mutex::new(storage)),
 			bitcoind_client: Arc::new(bitcoind_client(rpc_address, rpc_user, rpc_pass, None)?),
 			persister: Arc::new(Mutex::new(persister)),
 			logger,
@@ -465,24 +466,28 @@ impl Broker {
 		Ok(())
 	}
 
-	pub fn push_to_batch_psbts(&self, psbt: Vec<u8>) -> Result<(), BoxError> {
-		let mut unlocked = self.batch_psbts.lock().unwrap();
-		unlocked.push(psbt);
-		Ok(())
+	pub fn next_id(&self) -> Result<u32, BoxError> {
+		let storage = self.storage.lock().unwrap();
+		storage.next_id()
 	}
 
-	pub fn get_batch_psbts(&self) -> Result<Vec<Vec<u8>>, BoxError> {
-		match self.batch_psbts.try_lock() {
-			Ok(mut psbts) => Ok(std::mem::take(&mut *psbts)),
-			Err(_) => Ok(vec![]),
-		}
+	pub fn upsert_psbt(
+		&self, id: Option<u32>, status: BatchPsbtStatus, psbt: &Psbt,
+	) -> Result<u32, BoxError> {
+		let storage = self.storage.lock().unwrap();
+		let id = id.unwrap_or(storage.next_id()?);
+		storage.upsert(id, status, psbt)?;
+		Ok(id)
 	}
 
-	pub fn len_batch_psbts(&self) -> Result<usize, BoxError> {
-		match self.batch_psbts.try_lock() {
-			Ok(psbts) => Ok(psbts.len()),
-			Err(_) => Ok(0),
-		}
+	pub fn psbt_by_id(&self, id: u32) -> Result<Option<BatchPsbtStored>, BoxError> {
+		let storage = self.storage.lock().unwrap();
+		storage.psbt_by_id(id)
+	}
+
+	pub fn stored_psbts(&self, status: BatchPsbtStatus) -> Result<Vec<BatchPsbtStored>, BoxError> {
+		let storage = self.storage.lock().unwrap();
+		storage.psbts(status)
 	}
 
 	pub fn broadcast_transaction(&self, tx: &Transaction) -> Result<Txid, BoxError> {

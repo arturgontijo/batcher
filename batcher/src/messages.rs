@@ -10,11 +10,12 @@ use lightning::ln::wire::{self, CustomMessageReader};
 use lightning::types::features::{InitFeatures, NodeFeatures};
 use lightning::util::ser::{Readable, Writeable, Writer};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BatchMessage {
 	BatchPsbt {
 		sender_node_id: PublicKey,
 		receiver_node_id: PublicKey,
+		id: u32,
 		uniform_amount: u64,
 		fee_per_participant: u64,
 		max_utxo_per_participant: u8,
@@ -55,6 +56,7 @@ impl Writeable for BatchMessage {
 			BatchMessage::BatchPsbt {
 				sender_node_id,
 				receiver_node_id,
+				id,
 				uniform_amount,
 				fee_per_participant,
 				max_utxo_per_participant,
@@ -70,6 +72,7 @@ impl Writeable for BatchMessage {
 				w.write_all(&[0x01])?;
 				sender_node_id.write(w)?;
 				receiver_node_id.write(w)?;
+				id.write(w)?;
 				uniform_amount.write(w)?;
 				fee_per_participant.write(w)?;
 				max_utxo_per_participant.write(w)?;
@@ -127,6 +130,8 @@ impl Readable for BatchMessage {
 
 		match msg_type[0] {
 			0x01 => {
+				let id = u32::read(r)?;
+
 				let uniform_amount: u64 = Readable::read(r)?;
 				let fee_per_participant: u64 = Readable::read(r)?;
 				let max_utxo_per_participant: u8 = Readable::read(r)?;
@@ -194,6 +199,7 @@ impl Readable for BatchMessage {
 				Ok(BatchMessage::BatchPsbt {
 					sender_node_id,
 					receiver_node_id,
+					id,
 					uniform_amount,
 					fee_per_participant,
 					max_utxo_per_participant,
@@ -261,7 +267,7 @@ impl CustomMessageHandler for BatchMessageHandler {
 	}
 
 	fn provided_node_features(&self) -> NodeFeatures {
-		todo!()
+		NodeFeatures::empty()
 	}
 
 	fn provided_init_features(&self, _their_node_id: PublicKey) -> InitFeatures {

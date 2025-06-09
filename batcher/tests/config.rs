@@ -6,12 +6,13 @@ use batcher::{
 	bitcoind::{fund_address, setup_bitcoind, wait_for_block},
 	config::{BrokerConfig, LoggerConfig, NodeConfig, WalletConfig},
 	node::Node,
+	storage::BatchPsbtStatus,
 	types::BoxError,
 	wallet::create_wallet,
 };
 
 use bdk_wallet::KeychainKind;
-use bitcoin::{absolute::LockTime, Amount, FeeRate, Network, Psbt};
+use bitcoin::{absolute::LockTime, Amount, FeeRate, Network};
 use common::{broadcast_tx, create_temp_dir, setup_nodes};
 
 #[test]
@@ -26,12 +27,13 @@ fn batcher_from_config() -> Result<(), BoxError> {
 	config.bitcoind.rpc_address = bitcoind.rpc_url();
 	config.wallet.file_path = format!("{}/wallet_from_config.db", temp_dir.display());
 	config.peers_db_path = format!("{}/peers_from_config.db", temp_dir.display());
-	config.logger.file_path = format!("{}/logger_from_config.db", temp_dir.display());
+	config.logger.file_path = format!("{}/logger_from_config.log", temp_dir.display());
+	config.broker.storage_path = format!("{}/broker_from_config.db", temp_dir.display());
 
 	let bitcoind_config = config.bitcoind.clone();
 
-	let broker_config = BrokerConfig::new(vec![], 25_000, 2, 60);
-	let mut others = setup_nodes(3, 7777, network, bitcoind_config.clone(), broker_config)?;
+	let mut others =
+		setup_nodes(3, 7777, network, bitcoind_config.clone(), &temp_dir, vec![], 25_000, 2, 60)?;
 
 	// Node that does not participate
 	let np_config = NodeConfig {
@@ -48,10 +50,11 @@ fn batcher_from_config() -> Result<(), BoxError> {
 			file_path: format!("{}/wallet_np.db", temp_dir.display()),
 		},
 		logger: LoggerConfig::new(
-			format!("{}/logger_from_config.log", temp_dir.display()),
+			format!("{}/logger_np.log", temp_dir.display()),
 			"trace".to_string(),
 		),
 		broker: BrokerConfig {
+			storage_path: format!("{}/broker_np.db", temp_dir.display()),
 			bootnodes: vec![
 				// Node[0]
 				(others[0].node_id(), others[0].endpoint()),
@@ -150,17 +153,17 @@ fn batcher_from_config() -> Result<(), BoxError> {
 		max_hops,
 	)?;
 
-	let mut batch_psbts = node.broker.get_batch_psbts()?;
+	let mut batch_psbts = node.broker.stored_psbts(BatchPsbtStatus::Ready)?;
 	while batch_psbts.is_empty() {
 		wait_for_block(&bitcoind.client, 2)?;
-		batch_psbts = node.broker.get_batch_psbts()?;
+		batch_psbts = node.broker.stored_psbts(BatchPsbtStatus::Ready)?;
 	}
 
-	let psbt_hex = batch_psbts.first().unwrap();
-	let mut psbt = Psbt::deserialize(&psbt_hex)?;
+	let batch_psbt = batch_psbts.first().unwrap();
+	let mut psbt = batch_psbt.psbt.clone();
 
 	np_node.sign_psbt(&mut psbt)?;
-	np_node.broker.push_to_batch_psbts(psbt.serialize())?;
+	np_node.broker.upsert_psbt(Some(0), BatchPsbtStatus::Ready, &psbt)?;
 
 	broadcast_tx(&bitcoind.client, &np_node, &others, &mut receiver, None)?;
 

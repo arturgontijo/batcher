@@ -7,15 +7,16 @@ port = 7070
 
 network = "regtest"
 
-peers_db_path = "/tmp/peers_from_config.db"
+peers_db_path = "/tmp/batcher/peers_from_config.db"
 
 # Wallet
 [wallet]
 mnemonic = "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
-file_path = "/tmp/wallet_from_config.db"
+file_path = "/tmp/batcher/wallet_from_config.db"
 
 # Broker
 [broker]
+storage_path = "/tmp/batcher/broker_config.db"
 # Initial nodes to connect to (eg. [(pubkey, endpoint)])
 bootnodes = [
     ["027f921585f2ac0c7c70e36110adecfd8fd14b8a99bfb3d000a283fcac358fce88", "0.0.0.0:7071"]
@@ -26,7 +27,7 @@ wallet_sync_interval = 60
 
 # Logger
 [logger]
-file_path = "/tmp/logger_from_config.log"
+file_path = "/tmp/batcher/logger_from_config.log"
 max_level = "trace"
 
 # Bitcoind

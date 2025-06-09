@@ -6,7 +6,7 @@ use crate::events::SimpleEventHandler;
 use crate::logger::{print_pubkey, SimpleLogger};
 use crate::messages::{BatchMessage, BatchMessageHandler};
 use crate::persister::InMemoryPersister;
-use crate::storage::PeerStorage;
+use crate::storage::{BatchPsbtStatus, PeerStorage};
 use crate::types::{
 	BoxError, ChainMonitor, ChannelManager, FixedFeeEstimator, MockBroadcaster, PeerManager,
 };
@@ -513,73 +513,45 @@ impl Node {
 		let node_alias = self.alias();
 		let other_ep_cloned = other_endpoint.clone();
 		let logger = self.logger.clone();
-		let peer_storage = self.peer_storage.clone();
 		let peer_manager = self.peer_manager.clone();
 		runtime.spawn(async move {
-			let mut count = 0;
-			while count < MAX_CONNECT_RETRIES {
-				match TcpStream::connect(&other_ep_cloned).await {
-					Ok(stream) => match stream.into_std() {
-						Ok(std_stream) => {
-							if persist {
-								let result = {
-									let storage = peer_storage.lock().unwrap();
-									storage.upsert_peer(&other_id, other_ep_cloned.clone())
-								};
-								match result {
-									Ok(_) => {
-										log_info!(
-											logger,
-											"[{}][{}] PeerStorage connecting {}@{}",
-											node_id,
-											node_alias,
-											other_id,
-											other_ep_cloned
-										);
-									},
-									Err(err) => {
-										log_error!(
-											logger,
-											"[{}][{}] PeerStorage failed: {}@{} | {}",
-											node_id,
-											node_alias,
-											other_id,
-											other_ep_cloned,
-											err
-										);
-									},
-								}
-								// drop(peer_storage);
-							}
-							setup_outbound(peer_manager.clone(), other_id, std_stream).await
-						},
-						Err(e) => {
-							log_error!(
-								logger,
-								"[{}][{}] Failed to convert stream: {e}",
-								node_id,
-								node_alias
-							);
-						},
-					},
-					Err(_) => {
-						log_error!(
+			match TcpStream::connect(&other_ep_cloned).await {
+				Ok(stream) => match stream.into_std() {
+					Ok(std_stream) => {
+						log_info!(
 							logger,
-							"[{}][{}] Failed to connect to peer {} @ {}",
+							"[{}][{}] PeerManager connecting to {}@{}",
 							node_id,
 							node_alias,
 							other_id,
 							other_ep_cloned
 						);
+						setup_outbound(peer_manager.clone(), other_id, std_stream).await
 					},
-				}
-				count += 1;
-				sleep(Duration::from_millis(250));
+					Err(e) => {
+						log_error!(
+							logger,
+							"[{}][{}] Failed to convert stream: {e}",
+							node_id,
+							node_alias
+						);
+					},
+				},
+				Err(_) => {
+					log_error!(
+						logger,
+						"[{}][{}] PeerManager Failed to connect to {} @ {}",
+						node_id,
+						node_alias,
+						other_id,
+						other_ep_cloned
+					);
+				},
 			}
 		});
 
-		if announce {
-			// Wait for handshake then send our endpoint to the connected Node
+		if announce || persist {
+			// Wait for handshake
 			let mut count = 0;
 			while !self.is_peer_connected(&other_id) {
 				sleep(Duration::from_millis(250));
@@ -590,7 +562,15 @@ impl Node {
 			}
 
 			if count < MAX_CONNECT_RETRIES {
-				self.announce(&other_id)?;
+				// Send our endpoint to the connected Node
+				if announce {
+					self.announce(&other_id)?;
+				}
+				// Persist other node details
+				if persist {
+					let storage = self.peer_storage.lock().unwrap();
+					storage.upsert_peer(&other_id, other_endpoint)?;
+				}
 			}
 		}
 
@@ -607,18 +587,16 @@ impl Node {
 		&self, their_node_id: PublicKey, output_script: ScriptBuf, amount: Amount,
 		fee_rate: FeeRate, locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
 		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
-	) -> Result<(), BoxError> {
-		match self.peer_manager.peer_by_node_id(&their_node_id) {
-			Some(_) => {},
-			None => {
-				log_error!(
-					self.logger,
-					"[{}][{}] Peer not connected: {}",
-					self.id,
-					self.alias,
-					their_node_id
-				)
-			},
+	) -> Result<u32, BoxError> {
+		if self.peer_manager.peer_by_node_id(&their_node_id).is_none() {
+			log_error!(
+				self.logger,
+				"[{}][{}] Peer not connected: {}",
+				self.id,
+				self.alias,
+				their_node_id
+			);
+			return Err("Peer not connected!".into());
 		}
 
 		let mut psbt = self.build_psbt(output_script, amount, fee_rate, locktime)?;
@@ -631,6 +609,7 @@ impl Node {
 		let fee_per_participant = fee_per_participant.to_sat();
 		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
 
+		let id = self.broker.upsert_psbt(None, BatchPsbtStatus::Created, &psbt)?;
 		let psbt_bytes = psbt.serialize();
 
 		log_info!(
@@ -648,6 +627,7 @@ impl Node {
 		);
 
 		let batch_psbt = BatchMessage::BatchPsbt {
+			id,
 			sender_node_id: self.node_id(),
 			receiver_node_id: their_node_id,
 			uniform_amount,
@@ -665,14 +645,14 @@ impl Node {
 
 		self.broker.send(&their_node_id, batch_psbt)?;
 
-		Ok(())
+		Ok(id)
 	}
 
 	pub fn init_multisig_psbt_batch(
 		&self, other: &PublicKey, output_script: ScriptBuf, amount: Amount, fee_rate: FeeRate,
 		locktime: LockTime, uniform_amount: bool, fee_per_participant: Amount,
 		max_participants: u8, max_utxo_per_participant: u8, max_hops: u8,
-	) -> Result<(), BoxError> {
+	) -> Result<u32, BoxError> {
 		let mut psbt =
 			self.broker.multisig_build_psbt(other, output_script, amount, fee_rate, locktime)?;
 
@@ -700,8 +680,11 @@ impl Node {
 		let fee_per_participant = fee_per_participant.to_sat();
 		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
 
+		let id = self.broker.upsert_psbt(None, BatchPsbtStatus::Created, &psbt)?;
+
 		if let Some(pd) = self.peer_manager.list_peers().first() {
 			let batch_psbt = BatchMessage::BatchPsbt {
+				id,
 				sender_node_id: self.node_id(),
 				receiver_node_id: pd.counterparty_node_id,
 				uniform_amount,
@@ -721,7 +704,7 @@ impl Node {
 			return Err("Node has no connected peers!".into());
 		}
 
-		Ok(())
+		Ok(id)
 	}
 
 	pub fn sync_wallet(&self) -> Result<(), BoxError> {
@@ -775,7 +758,7 @@ impl Node {
 		utxos: Vec<LocalOutput>, locktime: LockTime, uniform_amount: bool,
 		fee_per_participant: Amount, max_participants: u8, max_utxo_per_participant: u8,
 		max_hops: u8,
-	) -> Result<(), BoxError> {
+	) -> Result<u32, BoxError> {
 		if let Some(pd) = self.peer_manager.list_peers().first() {
 			let uniform_amount_opt = if uniform_amount { Some(amount) } else { None };
 
@@ -791,7 +774,10 @@ impl Node {
 				max_utxo_per_participant,
 			)?;
 
+			let id = self.broker.upsert_psbt(None, BatchPsbtStatus::Created, &psbt)?;
+
 			let batch_psbt = BatchMessage::BatchPsbt {
+				id,
 				sender_node_id: self.node_id(),
 				receiver_node_id: pd.counterparty_node_id,
 				uniform_amount: if uniform_amount_opt.is_some() { amount.to_sat() } else { 0 },
@@ -809,7 +795,7 @@ impl Node {
 
 			self.broker.send(&pd.counterparty_node_id, batch_psbt)?;
 
-			return Ok(());
+			return Ok(id);
 		}
 		Err("Can't build the PSBT!".into())
 	}
