@@ -129,7 +129,7 @@ pub fn broadcast_tx(
 
 	wait_for_block(&bitcoind_client, 3)?;
 
-	starting_node.broker.upsert_psbt(Some(batch_psbt.id), BatchPsbtStatus::Completed, &psbt)?;
+	starting_node.broker.update_psbt(batch_psbt.id, BatchPsbtStatus::Completed, &psbt)?;
 
 	for node in nodes {
 		node.sync_wallet()?;

@@ -6,7 +6,7 @@ use crate::events::SimpleEventHandler;
 use crate::logger::{print_pubkey, SimpleLogger};
 use crate::messages::{BatchMessage, BatchMessageHandler};
 use crate::persister::InMemoryPersister;
-use crate::storage::{BatchPsbtStatus, PeerStorage};
+use crate::storage::{BatchPsbtKind, PeerStorage};
 use crate::types::{
 	BoxError, ChainMonitor, ChannelManager, FixedFeeEstimator, MockBroadcaster, PeerManager,
 };
@@ -609,7 +609,7 @@ impl Node {
 		let fee_per_participant = fee_per_participant.to_sat();
 		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
 
-		let id = self.broker.upsert_psbt(None, BatchPsbtStatus::Created, &psbt)?;
+		let id = self.broker.insert_psbt(BatchPsbtKind::Node, &psbt)?;
 		let psbt_bytes = psbt.serialize();
 
 		log_info!(
@@ -680,7 +680,7 @@ impl Node {
 		let fee_per_participant = fee_per_participant.to_sat();
 		let uniform_amount = if uniform_amount { amount.to_sat() } else { 0 };
 
-		let id = self.broker.upsert_psbt(None, BatchPsbtStatus::Created, &psbt)?;
+		let id = self.broker.insert_psbt(BatchPsbtKind::Multisig, &psbt)?;
 
 		if let Some(pd) = self.peer_manager.list_peers().first() {
 			let batch_psbt = BatchMessage::BatchPsbt {
@@ -774,7 +774,7 @@ impl Node {
 				max_utxo_per_participant,
 			)?;
 
-			let id = self.broker.upsert_psbt(None, BatchPsbtStatus::Created, &psbt)?;
+			let id = self.broker.insert_psbt(BatchPsbtKind::Foreign, &psbt)?;
 
 			let batch_psbt = BatchMessage::BatchPsbt {
 				id,

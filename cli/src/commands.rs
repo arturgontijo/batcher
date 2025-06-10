@@ -227,11 +227,7 @@ pub fn handle_command(
 					let tx_id = node.broadcast_transactions(&tx)?;
 					println!("Tx Sent (id={})\n", tx_id);
 
-					node.broker.upsert_psbt(
-						Some(batch_psbt.id),
-						BatchPsbtStatus::Completed,
-						&psbt,
-					)?;
+					node.broker.update_psbt(batch_psbt.id, BatchPsbtStatus::Completed, &psbt)?;
 				}
 			} else {
 				println!("Node is not running.");

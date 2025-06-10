@@ -6,7 +6,7 @@ use bitcoin::psbt::{Input, Output};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, Psbt, TxIn, TxOut};
 use lightning::util::logger::Logger;
-use lightning::{log_debug, log_info};
+use lightning::{log_debug, log_error, log_info};
 use lightning_net_tokio::setup_outbound;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use crate::broker::Broker;
 use crate::logger::{print_pubkey, SimpleLogger};
 use crate::messages::BatchMessage;
-use crate::storage::{BatchPsbtStatus, PeerStorage};
+use crate::storage::{BatchPsbtKind, BatchPsbtStatus, PeerStorage};
 use crate::types::{BoxError, PeerManager};
 
 pub(crate) fn process_batch_messages(
@@ -229,8 +229,28 @@ pub(crate) fn process_batch_messages(
 		} else {
 			// Check if we need to sign or just route the PSBT to someone else
 			if participants.contains(node_id) {
-				log_info!(logger, "[{}][{}] BatchPsbt: Signing...", node_id, node_alias);
-				broker.sign_psbt(&mut psbt).unwrap();
+				// We are the initial/last node, check if we are the batch sender or it is a foreign PSBT
+				let is_sender = if participants.len() == 1 {
+					if let Some(stored_psbt) = broker.psbt_by_id(id)? {
+						matches!(stored_psbt.kind, BatchPsbtKind::Node | BatchPsbtKind::Multisig)
+					} else {
+						false
+					}
+				} else {
+					false
+				};
+
+				if is_sender || broker.check_psbt(&psbt, Amount::from_sat(fee_per_participant))? {
+					log_info!(logger, "[{}][{}] BatchPsbt: Signing...", node_id, node_alias);
+					broker.sign_psbt(&mut psbt).unwrap();
+				} else {
+					log_error!(
+						logger,
+						"[{}][{}] BatchPsbt: NOT Signing as inputs or outputs were tampered...",
+						node_id,
+						node_alias
+					);
+				}
 				participants.retain(|key| key != node_id);
 				endpoints.retain(|ep| ep != &node_endpoint.clone());
 			}
@@ -282,7 +302,7 @@ pub(crate) fn process_batch_messages(
 					node_alias,
 					psbt.len()
 				);
-				broker.upsert_psbt(Some(id), BatchPsbtStatus::Ready, &Psbt::deserialize(&psbt)?)?;
+				broker.update_psbt(id, BatchPsbtStatus::Ready, &Psbt::deserialize(&psbt)?)?;
 			}
 		}
 	} else if let BatchMessage::Announcement { sender_node_id, receiver_node_id, endpoint } = msg {

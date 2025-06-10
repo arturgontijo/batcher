@@ -1,6 +1,6 @@
 [package]
 name = "batcher"
-version = "0.0.12"
+version = "0.0.13"
 homepage.workspace = true
 repository.workspace = true
 authors.workspace = true

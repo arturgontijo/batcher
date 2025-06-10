@@ -6,7 +6,7 @@ use batcher::{
 	bitcoind::{fund_address, setup_bitcoind, wait_for_block},
 	config::{BrokerConfig, LoggerConfig, NodeConfig, WalletConfig},
 	node::Node,
-	storage::BatchPsbtStatus,
+	storage::{BatchPsbtKind, BatchPsbtStatus},
 	types::BoxError,
 	wallet::create_wallet,
 };
@@ -163,7 +163,8 @@ fn batcher_from_config() -> Result<(), BoxError> {
 	let mut psbt = batch_psbt.psbt.clone();
 
 	np_node.sign_psbt(&mut psbt)?;
-	np_node.broker.upsert_psbt(Some(0), BatchPsbtStatus::Ready, &psbt)?;
+	let id = np_node.broker.insert_psbt(BatchPsbtKind::Node, &psbt)?;
+	np_node.broker.update_psbt(id, BatchPsbtStatus::Ready, &psbt)?;
 
 	broadcast_tx(&bitcoind.client, &np_node, &others, &mut receiver, None)?;
 

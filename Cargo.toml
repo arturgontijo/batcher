@@ -16,7 +16,7 @@ members = [
 tokio = { version = "1.0", features = ["full"] }
 rand = "0.8"
 
-lightning = { version = "0.1.2", features = ["std"] }
+lightning = { version = "0.1.4", features = ["std"] }
 lightning-net-tokio = "0.1.0"
 
 bitcoincore-rpc = { version = "0.19.0" }

@@ -28,7 +28,7 @@ use crate::{
 	config::BrokerConfig,
 	logger::SimpleLogger,
 	messages::{BatchMessage, BatchMessageHandler},
-	storage::{BatchPsbtStatus, BatchPsbtStored, BrokerStorage},
+	storage::{BatchPsbtKind, BatchPsbtStatus, BatchPsbtStored, BrokerStorage},
 	types::{BoxError, PersistedWallet},
 	wallet::sync_wallet,
 };
@@ -453,6 +453,33 @@ impl Broker {
 		Ok(())
 	}
 
+	pub fn check_psbt(&self, psbt: &Psbt, fee: Amount) -> Result<bool, BoxError> {
+		let mut input_value = Amount::ZERO;
+		let mut output_value = Amount::ZERO;
+
+		let utxos = self.list_unspent()?;
+
+		let mut wallets = self.wallets.lock().unwrap();
+		if let Some(wallet) = wallets.get_mut(&self.pubkey) {
+			for input in &psbt.unsigned_tx.input {
+				for utxo in &utxos {
+					if input.previous_output == utxo.outpoint {
+						input_value += utxo.txout.value;
+						break;
+					}
+				}
+			}
+			for output in &psbt.unsigned_tx.output {
+				if wallet.is_mine(output.script_pubkey.clone()) {
+					output_value += output.value;
+				}
+			}
+		} else {
+			return Err("Node wallet not found!".into());
+		}
+		Ok(input_value + fee == output_value)
+	}
+
 	pub fn send(&self, their_node_id: &PublicKey, msg: BatchMessage) -> Result<(), BoxError> {
 		log_debug!(
 			self.logger,
@@ -471,13 +498,18 @@ impl Broker {
 		storage.next_id()
 	}
 
-	pub fn upsert_psbt(
-		&self, id: Option<u32>, status: BatchPsbtStatus, psbt: &Psbt,
-	) -> Result<u32, BoxError> {
+	pub fn insert_psbt(&self, kind: BatchPsbtKind, psbt: &Psbt) -> Result<u32, BoxError> {
 		let storage = self.storage.lock().unwrap();
-		let id = id.unwrap_or(storage.next_id()?);
-		storage.upsert(id, status, psbt)?;
+		let id = storage.insert(BatchPsbtStatus::Created, kind, psbt)?;
 		Ok(id)
+	}
+
+	pub fn update_psbt(
+		&self, id: u32, status: BatchPsbtStatus, psbt: &Psbt,
+	) -> Result<(), BoxError> {
+		let storage = self.storage.lock().unwrap();
+		storage.update(id, status, psbt)?;
+		Ok(())
 	}
 
 	pub fn psbt_by_id(&self, id: u32) -> Result<Option<BatchPsbtStored>, BoxError> {
